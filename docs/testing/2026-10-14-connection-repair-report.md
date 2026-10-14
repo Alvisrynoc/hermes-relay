@@ -25,6 +25,18 @@ commit plus an isolated test-only instrumentation patch. No additional product
 change, release, push, live restart or phone installation resulted from runtime
 testing. Repair commits retained their configured local bot identity.
 
+## Test-level mapping
+
+Plans are separated in the [index](2026-10-14-connection-repair-plan.md).
+The final 35 JVM cases comprise 18 unit/component cases (pagination 8,
+Robolectric notifier 10) and 17 client/handler/ViewModel integration cases
+(Gateway 9, REST client 2, ViewModel 6). Agent observer/roster/session batches
+are in-process integration coverage; generated-contract and required source
+checks are supporting checks. The four Android runtime cases are chat-subsystem
+system tests with synthetic external peers. Real phone/Desktop end-to-end
+acceptance is pending. Reclassification does not add executions or erase the
+unsuccessful attempts below.
+
 ## Evidence and provenance
 
 | Evidence | Retention and meaning |
@@ -334,6 +346,32 @@ four runtime regressions. Original private logs/configuration are not published.
 | OAuth configuration inspection/validation | Stored login entries and direct token-validation results were inspected before requested cleanup. No credentials, token values or account identifiers are retained in this report. This was configuration diagnosis, not Relay regression coverage. |
 | SSH/network operational diagnostics | Service/listener/firewall/key-file/ACL checks and reachability diagnostics were performed during earlier setup. User-reported network recovery followed a VPN toggle. These are not automated proof of mobile Meshnet reachability or successful post-key-install phone authentication. |
 | Git checks | Repair branch, author/committer configuration, issue-commit sequence and tracked-clean state checked. Local commits only; no push or deployment. |
+
+## Phone acceptance candidate artifact verification
+
+The arm64 `sideloadCandidate` APK was assembled from product commit
+`b99af532f2db8c39c81bd5665507d9a5c20992c9`. Assembly, including R8 and the
+variant's lintVital tasks, passed in 7m46s. Signature verification and static
+manifest inspection passed. This is build/artifact evidence, not a phone
+acceptance result or a runtime pass for this optimized APK. The four automated
+runtime tests above used the separate `sideloadDebug` variant.
+
+| Property | Verified value |
+|---|---|
+| File | `hermes-relay-1.18.1-connection-repair-uat-arm64.apk` |
+| Package / label | `com.axiomlabs.hermesrelay.sideload.candidate` / `HR Candidate` |
+| Version | `1.18.1-sideload-candidate`, code 59 |
+| ABI / SDK | `arm64-v8a`; min 26, target 36, compile 37 |
+| Size | 59,608,664 bytes |
+| SHA-256 | `889EC7776B8B07ABE225A3DF968C1E17275E2427B6834262D3E2B7B55BDF0AA1` |
+| MD5 | `683D80369B6702FF2B85FBCDB18BDC7B` |
+| Signing | Isolated debug certificate; v2 verified; one signer |
+| Certificate SHA-256 | `c7a57d1095330c19a959bc910646a037a3224d5bc68cc8e543353b5c30630675` |
+
+The separate package installs alongside existing Relay and requires pairing
+again. PC backend activation, phone installation, real notification sound/
+vibration and full notification-tap navigation remain unexecuted prerequisites
+or checks in the [E2E plan](e2e/2026-10-14-connection-repair-plan.md).
 
 ## Remaining validation limits
 

@@ -1,6 +1,6 @@
 # Connection repair test plan
 
-Date: 2026-10-14. This is the executed repair validation plan, including the
+Date: 2026-10-14. This index links plans by test level, including the
 later addition of four focused Android runtime checks. Results and unsuccessful
 attempts are recorded in the [test report](2026-10-14-connection-repair-report.md).
 
@@ -59,129 +59,25 @@ test checkout, not assumed to be present in the repair commit.
   sandbox when reproducing this host's native packaging restriction. This is
   a build environment condition, not an app-code workaround.
 
-## Focused JVM selection
+## Plans by test level
 
-The exact 35 successful selections are preserved in the sanitized JUnit XML
-under [evidence](evidence/2026-10-14-connection-repair/). The issue groups are:
+Classify by the exercised boundary, not by the Gradle task name or whether a
+JVM/emulator is used. These files reorganize the existing validation; they do
+not add product scope or claim new test executions.
 
-| Issue | Classes | Cases |
-|---|---|---:|
-| 1 | `GatewayChatClientTest` | 4 |
-| 2 | `DashboardApiClientTest`, `SessionMessagePaginationTest`, `ChatViewModelGatewayInboundTurnTest` | 2 + 8 + 2 |
-| 3 | `GatewayChatClientTest`, `InteractionRequestNotifierTest`, `ChatViewModelGatewayInboundTurnTest` | 4 + 10 + 3 |
-| 5 | `GatewayChatClientTest`, `ChatViewModelGatewayInboundTurnTest` | 1 + 1 |
+| Folder | Plan | Boundary and status |
+|---|---|---|
+| `ut/` | [Unit tests](ut/2026-10-14-connection-repair-plan.md) | Pagination logic and Robolectric notification component: 18 final JVM cases passed |
+| `it/` | [Integration tests](it/2026-10-14-connection-repair-plan.md) | Real Android client/handler/ViewModel with synthetic peers: 17 final JVM cases passed; isolated Agent registry/session integration batches recorded separately |
+| `system/` | [Android system tests](system/2026-10-14-connection-repair-plan.md) | Android chat subsystem and OS notification behavior: four focused emulator scenarios passed; external Desktop/provider mocked |
+| `e2e/` | [End-to-end phone acceptance](e2e/2026-10-14-connection-repair-plan.md) | Real phone, Desktop and remote route: pending, not executed |
+| `checks/` | [Build, contract and diagnostic checks](checks/2026-10-14-connection-repair-plan.md) | Source/contract/artifact verification and earlier operational diagnostics; baseline failures remain explicit |
 
-Use each XML testcase's class and method as a separate `--tests` selection.
-Do not substitute an entire large test class for these selections.
-
-```powershell
-# Activate an isolated local toolchain first.
-$gradleArgs = @(':app:testSideloadDebugUnitTest', '--no-daemon')
-foreach ($selector in $selectedClassAndMethodNames) {
-    $gradleArgs += @('--tests', $selector)
-}
-.\scripts\android-lane.ps1 gradle @gradleArgs
-```
-
-## Four Android runtime scenarios
-
-All methods belong to
-`com.hermesandroid.relay.viewmodel.RelayConnectionRepairInstrumentedTest`.
-
-### 1. `largeHistoryAttachment_survivesTransportCapAndSends`
-
-1. Configure 1,500 synthetic history rows, including reasoning, exceeding
-   4 MiB before a fresh client attaches. The fixture closes an oversized
-   snapshot with WebSocket code 1009.
-2. Open the exact owner and wait for its bounded latest history and Ready
-   client state. Submit a synthetic continuation through the production
-   ViewModel and receive the synthetic response through the real socket.
-3. Persist the completed reply in fixture history before emitting completion.
-4. Require zero cap closures, Ready, one submission, zero interrupts and the
-   correctly owned/persisted reply. Read it with the existing list scroll
-   action and require the actual production chat bubble to render.
-
-This tests the attachment/send boundary. Direct ViewModel submission bypasses
-the screen's Send-button follow reducer, so automatic following and Send-button
-enablement are not acceptance claims for this scenario.
-
-### 2. `recentHistory_refreshShowsLoadingErrorAndRetainsTranscript`
-
-1. Configure 80 rows before opening; require only the latest 50 and the newest
-   visible row. Verify the bounded REST request window.
-2. Block a passive refresh. Require a rendered loading indication while the
-   existing newest row remains visible.
-3. Return HTTP 503. Require a rendered error and the retained transcript.
-4. Allow a later healthy passive refresh. Require the error to clear.
-
-Recovery here is a later passive refresh; no explicit Retry button is claimed.
-Older-page merge/load behavior is covered by the focused JVM tests.
-
-### 3. `desktopInput_postsOwnedNotificationAndReviewRendersAuthenticatedCard`
-
-1. Open the synthetic conversation, enable persistent background connection
-   behavior and move the Activity to the background.
-2. Expose a sanitized Desktop-owned pending-input snapshot. Require an actual
-   OS notification, a high-importance channel with the new-channel vibration
-   preference enabled, and the exact owner's immutable PendingIntent identity.
-3. Require no automatic turn acquisition, prompt submission or answer.
-4. Return authenticated open-request replay and invoke the production
-   exact-owner review endpoint. Require the command approval card to render,
-   with no submitted prompt or automatic request response.
-
-This checks notification identity plus the production review/card endpoint.
-It does not launch the complete MainActivity notification navigation route.
-The JVM lane checks the review-route flag and ordinary passive-route behavior.
-
-### 5. `observedSubagents_renderOnlyCurrentConversationAndClearOnSwitch`
-
-1. Require the rendered current-conversation count of three active children.
-2. Supply a foreign durable conversation reporting nine; require the current
-   count/label to clear rather than adopt it.
-3. Restore the owned count, then switch owner; require immediate clearing.
-
-## Runtime execution recipe
-
-Apply the test-only patch to the final tested product checkout, activate the
-isolated SDK/JDK and start only one API 36 test emulator. Build debug artifacts:
-
-```powershell
-.\scripts\android-lane.ps1 gradle :app:assembleSideloadDebug --no-daemon
-.\scripts\android-lane.ps1 gradle :app:assembleSideloadDebugAndroidTest --no-daemon --max-workers=1
-```
-
-The native test-APK packager required outside-sandbox execution on the tested
-host. No permanent build property or alternate AAPT2 binary is required for
-the successful build.
-
-Install only on the chosen emulator using explicit ADB port and serial. Set
-`$appApk` and `$testApk` to their generated files:
-
-```powershell
-$adb = Join-Path $env:ANDROID_HOME 'platform-tools\adb.exe'
-# Set these to the explicitly created isolated test emulator/server.
-$adbPort = 5038
-$serial = 'emulator-5560'
-.\scripts\android-lane.ps1 exec $adb -P $adbPort -s $serial install -r $appApk
-.\scripts\android-lane.ps1 exec $adb -P $adbPort -s $serial install -r $testApk
-
-$testClass = 'com.hermesandroid.relay.viewmodel.RelayConnectionRepairInstrumentedTest'
-$methods = @(
-    'largeHistoryAttachment_survivesTransportCapAndSends',
-    'recentHistory_refreshShowsLoadingErrorAndRetainsTranscript',
-    'desktopInput_postsOwnedNotificationAndReviewRendersAuthenticatedCard',
-    'observedSubagents_renderOnlyCurrentConversationAndClearOnSwitch'
-)
-$selectors = ($methods | ForEach-Object { "$testClass#$_" }) -join ','
-.\scripts\android-lane.ps1 exec $adb -P $adbPort -s $serial shell am instrument -w -r `
-    -e class $selectors `
-    com.axiomlabs.hermesrelay.sideload.test/androidx.test.runner.AndroidJUnitRunner
-```
-
-Require `numtests=4`, four method success statuses and `OK (4 tests)`.
-ADB's process exit code alone does not prove success: failed instrumentation
-runs also returned exit code zero. Record product SHA, test patch/APK hashes,
-selected methods, lane, settings, results and harness limitations.
+The UT and Android IT selections partition the original 35 final JVM cases;
+18 + 17 = 35, not additional runs. Backend batches overlap and must not be
+summed into a distinct total. The existing report and evidence paths remain
+stable. Phone acceptance status must be recorded independently of automated
+system test results.
 
 ## Certification limits
 
