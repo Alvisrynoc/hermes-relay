@@ -4525,6 +4525,110 @@ class ChatViewModelGatewayInboundTurnTest {
     }
 
     @Test
+    fun desktopPendingSnapshotAlertsWithoutClaimingOrAnsweringRequest() {
+        val app = org.robolectric.RuntimeEnvironment.getApplication()
+        shadowOf(app).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+        val notifications = app.getSystemService(android.app.NotificationManager::class.java)
+        notifications.cancelAll()
+        @Suppress("UNCHECKED_CAST")
+        val foreground = com.hermesandroid.relay.util.AppForegroundTracker::class.java
+            .getDeclaredField("_isForeground").apply { isAccessible = true }
+            .get(null) as kotlinx.coroutines.flow.MutableStateFlow<Boolean>
+        val previousForeground = foreground.value
+        try {
+            foreground.value = true
+            viewModel.initializeGatewayOnly(app)
+            viewModel.setChatTurnCheckpointStore(MemoryCheckpointStore())
+            viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", "observer"), STORED_SESSION_ID)
+            awaitCondition { !viewModel.isLoadingHistory.value }
+            viewModel.notifyOnTurnComplete = true
+            gatewayClient.setKeepAliveInBackground(true)
+            val baseline = gatewayHarness.rpcLog.count { it.first in setOf("session.resume", "session.activate", "prompt.submit") }
+            gatewayHarness.activeSessionListPayload = buildJsonObject {
+                put("sessions", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "desktop-runtime")
+                        put("session_key", STORED_SESSION_ID)
+                        put("profile", "observer")
+                        put("status", "waiting")
+                        put("last_active", 1.0)
+                        put("pending_inputs", buildJsonArray {
+                            add(buildJsonObject { put("id", "request-1"); put("method", "approval") })
+                        })
+                    })
+                })
+            }
+            foreground.value = false
+            viewModel.setChatVisible(false)
+            viewModel.requestSessionActivityRefresh()
+            awaitCondition { notifications.activeNotifications.size == 1 }
+            assertNull(viewModel.pendingAsk.value)
+            assertEquals(baseline, gatewayHarness.rpcLog.count { it.first in setOf("session.resume", "session.activate", "prompt.submit") })
+            viewModel.requestSessionActivityRefresh()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(1, notifications.activeNotifications.size)
+            gatewayHarness.activeSessionListPayload = buildJsonObject { put("sessions", buildJsonArray {}) }
+            viewModel.requestSessionActivityRefresh()
+            awaitCondition { notifications.activeNotifications.isEmpty() }
+        } finally {
+            foreground.value = previousForeground
+            gatewayClient.setKeepAliveInBackground(false)
+            notifications.cancelAll()
+        }
+    }
+
+    @Test
+    fun inputNotificationReviewReplaysCardWithoutInventingPhoneTurn() {
+        val checkpointStore = MemoryCheckpointStore()
+        viewModel.setChatTurnCheckpointStore(checkpointStore)
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        gatewayHarness.recoveryRunning = true
+        gatewayHarness.recoveryOpenRequests = buildJsonArray {
+            add(buildJsonObject {
+                put("id", "srq-review"); put("method", "clarify")
+                put("params", buildJsonObject { put("session_id", "live-resumed"); put("question", "Continue?") })
+            })
+        }
+        val sends = gatewayHarness.rpcLog.count { it.first == "prompt.submit" }
+        runBlocking {
+            viewModel.reviewPendingInput(com.hermesandroid.relay.notifications.ChatNotificationTarget(
+                "connection-a", null, STORED_SESSION_ID))
+        }
+        awaitCondition { viewModel.pendingAsk.value != null }
+        assertEquals("jsonrpc:\"srq-review\"", viewModel.pendingAsk.value!!.ask.requestId)
+        assertNull(checkpointStore.checkpoint)
+        assertEquals(sends, gatewayHarness.rpcLog.count { it.first == "prompt.submit" })
+        viewModel.updateGatewayClient(null)
+        assertEquals(0, gatewayHarness.rpcLog.count { it.first == "session.interrupt" })
+    }
+
+    @Test
+    fun inputNotificationReviewRejectsWrongOwnerAndSupervision() {
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        val methods = setOf("session.activate", "session.resume", "prompt.submit")
+        val before = gatewayHarness.rpcLog.count { it.first in methods }
+        runBlocking {
+            viewModel.reviewPendingInput(com.hermesandroid.relay.notifications.ChatNotificationTarget(
+                "other-connection", null, STORED_SESSION_ID))
+        }
+        viewModel.updateSupervisedModePolicy(com.hermesandroid.relay.data.SupervisedModePolicy(enabled = true))
+        runBlocking {
+            viewModel.reviewPendingInput(com.hermesandroid.relay.notifications.ChatNotificationTarget(
+                "connection-a", null, STORED_SESSION_ID))
+        }
+        viewModel.updateSupervisedModePolicy(com.hermesandroid.relay.data.SupervisedModePolicy())
+        viewModel.setLockedProfileNameProvider { "locked" }
+        runBlocking {
+            viewModel.reviewPendingInput(com.hermesandroid.relay.notifications.ChatNotificationTarget(
+                "connection-a", null, STORED_SESSION_ID))
+        }
+        assertEquals(before, gatewayHarness.rpcLog.count { it.first in methods })
+        assertNull(viewModel.pendingAsk.value)
+    }
+
+    @Test
     fun passiveHistoryRefreshShowsLoadingAndKeepsTranscriptOnFailure() {
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()

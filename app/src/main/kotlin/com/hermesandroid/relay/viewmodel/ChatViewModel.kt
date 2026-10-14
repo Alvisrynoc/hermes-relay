@@ -442,6 +442,7 @@ class ChatViewModel : ViewModel() {
     fun updateSupervisedModePolicy(policy: SupervisedModePolicy) {
         supervisedModePolicy = policy
         if (policy.enabled) {
+            clearSnapshotInputHints()
             _pendingAttachments.update { attachments ->
                 attachments.filterIndexed { index, attachment ->
                     isAttachmentAllowedBySupervision(attachment, index)
@@ -566,6 +567,7 @@ class ChatViewModel : ViewModel() {
         if (scope == lastSessionActivityScope) return
         clearProjectedBackgroundProcesses()
         lastSessionActivityScope = scope
+        clearSnapshotInputHints()
         val generation = sessionActivityGeneration.incrementAndGet()
         sessionActivityPollJob?.cancel()
         sessionActivityPollJob = null
@@ -2547,9 +2549,70 @@ class ChatViewModel : ViewModel() {
         requestSessionActivityRefresh()
     }
 
+    private fun canPollSessionActivity(client: GatewayChatClient): Boolean =
+        chatVisible || (notifyOnTurnComplete && client.isBackgroundProcessPollingAllowed() &&
+            client.connectionState.value == GatewayConnectionState.Ready)
+
+    // Snapshot requests are notification hints only. They never enter pendingAsk/respondAsk.
+    private data class SnapshotInputHint(
+        val sessionId: String,
+        val ask: GatewayAsk,
+        val profile: String,
+        val contextKey: String,
+    )
+    private val observedSnapshotInputs = mutableMapOf<String, SnapshotInputHint>()
+    private val deliveredSnapshotInputs = mutableSetOf<String>()
+
+    private fun clearSnapshotInputHints() {
+        observedSnapshotInputs.values.forEach { hint ->
+            cancelInteractionNotification(hint.sessionId, hint.ask, hint.profile, hint.contextKey)
+        }
+        observedSnapshotInputs.clear()
+        deliveredSnapshotInputs.clear()
+    }
+
+    private fun reconcileSnapshotInputs(rows: List<GatewayActiveSession>, scope: SessionActivityScope) {
+        if (supervisedModePolicy.enabled) {
+            clearSnapshotInputHints()
+            return
+        }
+        val next = mutableMapOf<String, SnapshotInputHint>()
+        rows.forEach { row ->
+            // Optional profile attribution must be explicit before posting a process-wide hint.
+            val profile = row.profile?.takeIf(String::isNotBlank) ?: return@forEach
+            val allowedProfile = currentSessionProfileName() ?: conversationBinding.value.displayProfile?.name
+                ?: displayProfileProvider()?.name
+            if (AgentDisplay.profileSessionKey(profile) != scope.profile &&
+                !profile.equals(allowedProfile, ignoreCase = true)) return@forEach
+            row.pendingInputs.forEach inputLoop@ { input ->
+                val kind = when (input.method) {
+                    "approval", "approval.request" -> GatewayAsk.Kind.APPROVAL
+                    "clarify", "clarify.request" -> GatewayAsk.Kind.CLARIFY
+                    "sudo", "sudo.request" -> GatewayAsk.Kind.SUDO
+                    "secret", "secret.request" -> GatewayAsk.Kind.SECRET
+                    else -> return@inputLoop
+                }
+                val ask = GatewayAsk(kind, input.id, text = "", timeoutSeconds = 0)
+                val key = "${scope.connectionId}:$profile:${row.storedSessionId}:${input.method}:${input.id}"
+                val contextKey = AgentDisplay.profileContextKey(scope.connectionId, profile)
+                next[key] = SnapshotInputHint(row.storedSessionId, ask, profile, contextKey)
+                if (key !in deliveredSnapshotInputs &&
+                    maybeNotifyInteraction(row.storedSessionId, ask, profile, contextKey)) {
+                    deliveredSnapshotInputs += key
+                }
+            }
+        }
+        observedSnapshotInputs.filterKeys { it !in next }.values.forEach { hint ->
+            cancelInteractionNotification(hint.sessionId, hint.ask, hint.profile, hint.contextKey)
+        }
+        deliveredSnapshotInputs.retainAll(next.keys)
+        observedSnapshotInputs.clear()
+        observedSnapshotInputs.putAll(next)
+    }
+
     fun requestSessionActivityRefresh() {
         val client = gatewayClient ?: return
-        if (streamingEndpoint != "gateway" || !chatVisible) return
+        if (streamingEndpoint != "gateway" || !canPollSessionActivity(client)) return
         // Directory admission prevents activity polling from opening the cold
         // socket early. Once this exact client is already Ready, active-list is
         // passive observation and must remain available without re-activating a
@@ -2570,7 +2633,7 @@ class ChatViewModel : ViewModel() {
         var hasPassiveCurrentLiveWork = false
         var hasPassiveCatchupPending = false
         sessionActivityPollMutex.withLock {
-            if (gatewayClient !== client || !chatVisible || streamingEndpoint != "gateway") return
+            if (gatewayClient !== client || !canPollSessionActivity(client) || streamingEndpoint != "gateway") return
             val generation = sessionActivityGeneration.get()
             val currentScope = activityScope() ?: return
             val currentOwner = activityOwner(chatHandler?.currentSessionId?.value)
@@ -2589,6 +2652,7 @@ class ChatViewModel : ViewModel() {
             when (val result = client.listActiveSessions()) {
                 is GatewayActiveSessionsResult.Success -> {
                     if (gatewayClient !== client || generation != sessionActivityGeneration.get()) return
+                    reconcileSnapshotInputs(result.sessions, currentScope)
                     val currentStoredId = currentOwner?.storedSessionId
                     val passiveCurrentRows = if (currentStoredId == null) {
                         emptyList()
@@ -2606,12 +2670,12 @@ class ChatViewModel : ViewModel() {
                     val needsFinalPassiveRefresh =
                         passivelyObservedGatewaySessionId == currentStoredId &&
                             !hasPassiveCurrentLiveWork
-                    if (hasPassiveCurrentLiveWork) {
+                    if (hasPassiveCurrentLiveWork && chatVisible) {
                         currentStoredId?.let(::refreshPassivelyObservedGatewayHistory)
                         if (initialCatchupPending) {
                             passiveObservationCatchupPendingSessionId = null
                         }
-                    } else if (needsFinalPassiveRefresh || initialCatchupPending) {
+                    } else if (chatVisible && (needsFinalPassiveRefresh || initialCatchupPending)) {
                         val scheduled = currentStoredId?.let { storedId ->
                             refreshPassivelyObservedGatewayHistory(
                                 storedSessionId = storedId,
@@ -2688,7 +2752,7 @@ class ChatViewModel : ViewModel() {
                 is GatewayActiveSessionsResult.TransientFailure -> {
                     if (gatewayClient !== client || generation != sessionActivityGeneration.get()) return
                     val currentStoredId = currentOwner?.storedSessionId
-                    if (passiveObservationCatchupPendingSessionId == currentStoredId) {
+                    if (chatVisible && passiveObservationCatchupPendingSessionId == currentStoredId) {
                         val scheduled = currentStoredId?.let { storedId ->
                             refreshPassivelyObservedGatewayHistory(
                                 storedSessionId = storedId,
@@ -2712,7 +2776,7 @@ class ChatViewModel : ViewModel() {
             projectCurrentBackgroundProcesses(generation, now)
         }
 
-        if (gatewayClient !== client || !chatVisible) return
+        if (gatewayClient !== client || !canPollSessionActivity(client)) return
         val hasConfirmedLiveWork = sessionActivityRegistry.value.records.values.any { record ->
             record.freshness == SessionActivityFreshness.Confirmed &&
                 record.phase(System.currentTimeMillis()) != SessionActivityPhase.Idle
@@ -2722,7 +2786,7 @@ class ChatViewModel : ViewModel() {
         ) 1_500L else 30_000L
         sessionActivityPollJob = viewModelScope.launch {
             delay(delayMs)
-            if (gatewayClient === client && chatVisible) pollSessionActivity(client)
+            if (gatewayClient === client && canPollSessionActivity(client)) pollSessionActivity(client)
         }
     }
 
@@ -2789,6 +2853,7 @@ class ChatViewModel : ViewModel() {
         val previousClient = gatewayClient
         val changed = previousClient !== client
         if (changed) {
+            clearSnapshotInputHints()
             modelOptionsGeneration.incrementAndGet()
             _modelOptionsLoading.value = false
             _modelOptionsRefreshing.value = false
@@ -3729,6 +3794,7 @@ class ChatViewModel : ViewModel() {
             passiveGatewayHistoryRefreshJob = null
             passivelyObservedGatewaySessionId = null
             passiveObservationCatchupPendingSessionId = null
+            requestSessionActivityRefresh()
         }
         return changed
     }
@@ -3959,11 +4025,15 @@ class ChatViewModel : ViewModel() {
     var notifyOnTurnComplete: Boolean = true
         set(value) {
             field = value
-            if (!value) pendingReplyNotifications.clear()
+            if (!value) {
+                pendingReplyNotifications.clear()
+                deliveredSnapshotInputs.clear()
+            }
             if (!value) appContext?.let {
                 InteractionRequestNotifier.cancelAll(it)
                 TurnCompleteNotifier.cancelAll(it)
             }
+            if (value) requestSessionActivityRefresh()
         }
 
     /**
@@ -5153,6 +5223,40 @@ class ChatViewModel : ViewModel() {
             explicitBinding = true,
         )
         return true
+    }
+
+    /** Explicit input-notification review; ordinary conversation opens remain read-only. */
+    suspend fun reviewPendingInput(target: ChatNotificationTarget) {
+        val client = gatewayClient ?: return
+        val handler = chatHandler ?: return
+        val generation = sessionActivityGeneration.get()
+        val contextKey = AgentDisplay.profileContextKey(target.connectionId, target.profile)
+        fun ownsReview(): Boolean =
+            !supervisedModePolicy.enabled && gatewayClient === client && chatHandler === handler &&
+                streamingEndpoint == "gateway" && activeProfileContextKey == contextKey &&
+                sessionActivityGeneration.get() == generation &&
+                handler.currentSessionId.value == target.sessionId &&
+                (lockedProfileNameProvider() == null || AgentDisplay.profileSessionKey(lockedProfileNameProvider()) ==
+                    AgentDisplay.profileSessionKey(target.profile)) &&
+                AgentDisplay.profileSessionKey(currentSessionProfileName()) == AgentDisplay.profileSessionKey(target.profile)
+        if (!ownsReview()) return
+        kotlinx.coroutines.withTimeoutOrNull(30_000) { _isLoadingHistory.first { !it } } ?: return
+        if (!ownsReview() || activeStream != null) return
+        val registration = createGatewayInboundTurnRegistration(client, target.sessionId) ?: return
+        val recovery = client.recoverTurn(
+            storedId = target.sessionId,
+            preferredLiveId = client.currentLiveSessionId(target.sessionId),
+            callbacks = registration.callbacks,
+            androidOwned = false,
+            onHandle = { handle ->
+                if (!ownsReview()) false else registration.onHandle(handle).also { admitted ->
+                    if (admitted) registration.callbacks.onStart()
+                }
+            },
+        )
+        if (ownsReview()) {
+            recovery.exceptionOrNull()?.let { publishHistoryLoadFailure(target.sessionId, it) }
+        }
     }
 
     /**
@@ -7679,10 +7783,10 @@ class ChatViewModel : ViewModel() {
         ask: GatewayAsk,
         profile: String? = currentSessionProfileName(),
         contextKey: String? = activeProfileContextKey,
-    ) {
-        val context = appContext ?: return
-        val connectionId = AgentDisplay.parseProfileContextKey(contextKey)?.connectionId ?: return
-        InteractionRequestNotifier.notify(
+    ): Boolean {
+        val context = appContext ?: return false
+        val connectionId = AgentDisplay.parseProfileContextKey(contextKey)?.connectionId ?: return false
+        return InteractionRequestNotifier.notify(
             context = context,
             sessionId = sessionId,
             ask = ask,

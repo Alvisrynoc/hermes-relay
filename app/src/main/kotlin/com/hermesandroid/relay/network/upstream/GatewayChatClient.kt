@@ -451,6 +451,7 @@ class GatewayChatClient(
     private val serverRequestLock = Any()
     private val openServerRequests = linkedMapOf<String, OpenServerRequest>()
     private val retiredServerRequests = linkedSetOf<String>()
+    private val abandonedReviewRequests = linkedSetOf<String>()
     private val deferredServerRequests = mutableListOf<DeferredServerRequest>()
     private val lazyLiveSessions = ConcurrentHashMap.newKeySet<String>()
     private val readyLiveSessions = ConcurrentHashMap.newKeySet<String>()
@@ -1431,6 +1432,8 @@ class GatewayChatClient(
         preferredLiveId: String?,
         callbacks: GatewayTurnCallbacks,
         queuedTurnProvider: ((GatewayQueuedTurn) -> GatewayInboundTurnRegistration?)? = null,
+        androidOwned: Boolean = true,
+        onHandle: ((ActiveTurnHandle) -> Boolean)? = null,
     ): Result<GatewaySessionRecovery> = runCatching {
         require(storedId.isNotBlank()) { "stored session id required" }
         val requestedProfile = currentSessionProfile()
@@ -1461,7 +1464,7 @@ class GatewayChatClient(
                     callbacks = dispatchOn(callbacks),
                     dedupeAdjacentMessageStarts = true,
                     deferEvents = true,
-                    androidOwned = true,
+                    androidOwned = androidOwned,
                 ).also { turn ->
                     turn.markRecoveredStarted()
                     activeTurn = turn
@@ -1588,11 +1591,20 @@ class GatewayChatClient(
                     boundTurn = GatewayTurn(
                         callbacks = dispatchOn(callbacks),
                         dedupeAdjacentMessageStarts = true,
-                        androidOwned = true,
+                        deferEvents = true,
+                        androidOwned = androidOwned,
                     ).also { turn ->
                         turn.markRecoveredStarted()
                         activeTurn = turn
                     }
+                }
+                if (onHandle != null && !onHandle(boundTurn)) {
+                    discardReviewRequests(recoveredLiveId, response)
+                    if (activeTurn === boundTurn) activeTurn = null
+                    boundTurn.discardDeferredEvents()
+                    boundTurn.detach()
+                    synchronized(recoveryEventLock) { recoveryEvents = null }
+                    throw GatewayPreflightException("session review owner changed")
                 }
                 val buffered = synchronized(recoveryEventLock) {
                     recoveryEvents
@@ -1880,6 +1892,7 @@ class GatewayChatClient(
             return
         }
         val sid = request.sessionId
+        synchronized(serverRequestLock) { if (request.key in abandonedReviewRequests) return }
         val owned = !sid.isNullOrBlank() && (sid == liveSessionId || backgroundTurns.containsKey(sid))
         if (!owned) {
             val recovering = synchronized(recoveryEventLock) { recoveryEvents != null }
@@ -1919,6 +1932,23 @@ class GatewayChatClient(
         }
     }
 
+    private fun discardReviewRequests(sessionId: String, snapshot: JsonObject) {
+        val keys = synchronized(serverRequestLock) {
+            val deferred = deferredServerRequests.filter { GatewayServerRequest.parse(it.frame)?.sessionId == sessionId }
+            deferredServerRequests.removeAll(deferred.toSet())
+            val frames = (snapshot["open_requests"] as? JsonArray).orEmpty()
+                .mapNotNull { (it as? JsonObject)?.let(GatewayServerRequest::parse) }
+            (deferred.mapNotNull { GatewayServerRequest.parse(it.frame)?.key } +
+                frames.filter { it.sessionId == sessionId }.map { it.key } +
+                openServerRequests.values.filter { it.request.sessionId == sessionId }.map { it.request.key }).toSet()
+        }
+        synchronized(serverRequestLock) {
+            keys.forEach(openServerRequests::remove)
+            abandonedReviewRequests.addAll(keys)
+            while (abandonedReviewRequests.size > 256) abandonedReviewRequests.remove(abandonedReviewRequests.first())
+        }
+    }
+
     /** Called after the UI has recorded the previous response, preserving each queued approval. */
     fun advanceServerRequests(sessionId: String? = liveSessionId) {
         val next = synchronized(serverRequestLock) {
@@ -1939,6 +1969,10 @@ class GatewayChatClient(
         val deferred = synchronized(serverRequestLock) { deferredServerRequests.toList().also { deferredServerRequests.clear() } }
         val boundary = (snapshot["_android_request_sequence"] as? JsonPrimitive)?.longOrNull ?: serverRequestSequence.get()
         if (snapshot.containsKey("open_requests")) {
+            synchronized(serverRequestLock) {
+                frames.mapNotNull(GatewayServerRequest::parse).filter { it.sessionId == sessionId }
+                    .forEach { abandonedReviewRequests.remove(it.key) }
+            }
             val keys = synchronized(serverRequestLock) {
                 frames.mapNotNull(GatewayServerRequest::parse).filter { it.sessionId == sessionId }.map { it.key }.toSet() - retiredServerRequests
             }
@@ -3350,6 +3384,7 @@ class GatewayChatClient(
             openServerRequests.clear()
             deferredServerRequests.clear()
             retiredServerRequests.clear()
+            abandonedReviewRequests.clear()
         }
         val socket = transport.socket.newWebSocket(
             Request.Builder().url(url).build(),
@@ -3644,6 +3679,13 @@ class GatewayChatClient(
             status = status,
             lastActiveEpochSeconds = lastActive,
             profile = row.stringField("profile")?.trim()?.takeIf(String::isNotEmpty),
+            pendingInputs = (row["pending_inputs"] as? kotlinx.serialization.json.JsonArray)
+                ?.mapNotNull { element ->
+                    val input = element as? JsonObject ?: return@mapNotNull null
+                    val id = input.stringField("id")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                    val method = input.stringField("method") ?: return@mapNotNull null
+                    GatewayPendingInput(id, method)
+                }.orEmpty(),
         )
     }
 
@@ -4454,6 +4496,7 @@ class GatewayChatClient(
             // Successful enqueue is not a server acknowledgement. A new socket's authoritative
             // replay may ask again; retain no response value (especially credentials) for retries.
             retiredServerRequests.clear()
+            abandonedReviewRequests.clear()
         }
         failSessionReadyWaiters("gateway connection lost")
         lazyLiveSessions.clear()

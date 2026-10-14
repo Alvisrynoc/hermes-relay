@@ -2217,6 +2217,26 @@ class GatewayChatClientTest {
     }
 
     @Test
+    fun `active snapshot accepts optional sanitized pending identities`() = runBlocking {
+        harness.activeSessionListPayload = buildJsonObject {
+            put("sessions", JsonArray(listOf(buildJsonObject {
+                put("id", "desktop-runtime")
+                put("session_key", "stored-desktop")
+                put("profile", "operator")
+                put("status", "waiting")
+                put("last_active", 1.0)
+                put("pending_inputs", JsonArray(listOf(buildJsonObject {
+                    put("id", "input-1"); put("method", "clarify")
+                })))
+            })))
+        }
+        val result = client.listActiveSessions() as GatewayActiveSessionsResult.Success
+        assertEquals("operator", result.sessions.single().profile)
+        assertEquals(listOf(GatewayPendingInput("input-1", "clarify")), result.sessions.single().pendingInputs)
+        assertTrue(harness.rpcLog.none { it.first in setOf("session.resume", "session.activate", "prompt.submit") })
+    }
+
+    @Test
     fun `existing session id is resumed not recreated`() {
         val r = Recorder()
         client.sendTurn("20260101_010101_aaaaaa", "again", null, r.callbacks) {
@@ -4695,6 +4715,78 @@ class GatewayChatClientTest {
         assertEquals(listOf("tool-1" to "terminal"), recorder.toolStarts.toList())
         assertEquals(listOf("tool-1" to "tests passed"), recorder.toolDone.toList())
         assertEquals(listOf(" final"), recorder.textDeltas.toList())
+    }
+
+    @Test
+    fun `input review admits replay before callbacks and stays desktop owned`() = runBlocking {
+        harness.recoveryRunning = true
+        harness.recoveryOpenRequests = buildJsonArray {
+            add(buildJsonObject {
+                put("id", "srq-review"); put("method", "clarify")
+                put("params", buildJsonObject { put("session_id", "live-review"); put("question", "Continue?") })
+            })
+        }
+        val recorder = Recorder()
+        var admitted = false
+        val recovery = client.recoverTurn("stored-42", "live-review", recorder.callbacks,
+            androidOwned = false, onHandle = { assertTrue(recorder.interactions.isEmpty()); admitted = true; true }).getOrThrow()
+        assertTrue(admitted)
+        awaitCondition { recorder.interactions.size == 1 }
+        assertEquals("jsonrpc:\"srq-review\"", recorder.interactions.single().requestId)
+        assertNotNull(recovery.handle)
+        client.shutdown()
+        assertEquals(0, harness.rpcLog.count { it.first == "session.interrupt" || it.first == "prompt.submit" })
+    }
+
+    @Test
+    fun `input review rejects stale admission without delivering or interrupting`() = runBlocking {
+        harness.recoveryRunning = true
+        val recorder = Recorder()
+        val recovery = client.recoverTurn("stored-42", "live-review", recorder.callbacks,
+            androidOwned = false, onHandle = { false })
+        assertTrue(recovery.isFailure)
+        assertTrue(recorder.interactions.isEmpty())
+        assertEquals(0, harness.rpcLog.count { it.first == "session.interrupt" || it.first == "prompt.submit" })
+    }
+
+    @Test
+    fun `rejected input review drops buffered asks without replying in the next owner`() = runBlocking {
+        harness.suppressAckMethods += "session.resume"
+        val old = Recorder()
+        val review = scope.async {
+            client.recoverTurn("desktop-old", null, old.callbacks, androidOwned = false, onHandle = { false })
+        }
+        val ack = harness.awaitPendingAck()
+        val socket = harness.awaitServerSocket()
+        val frame = buildJsonObject {
+            put("jsonrpc", "2.0")
+            put("id", "srq-old-review"); put("method", "clarify")
+            put("params", buildJsonObject { put("session_id", "live-old"); put("question", "Continue?") })
+        }
+        socket.send(frame.toString())
+        harness.releaseAck(ack, buildJsonObject {
+            put("session_id", "live-old"); put("running", true)
+            put("info", buildJsonObject { put("profile_name", "default") })
+            put("open_requests", buildJsonArray { add(frame) })
+        })
+        assertTrue(review.await().isFailure)
+        socket.send(frame.toString())
+        harness.suppressAckMethods -= "session.resume"
+        harness.recoveryRunning = true
+        val next = Recorder()
+        val nextRecovery = client.recoverTurn("desktop-next", null, next.callbacks).getOrThrow()
+        socket.send(frame.toString())
+        client.listActiveSessions()
+        assertTrue(old.interactions.isEmpty())
+        assertTrue(next.interactions.isEmpty())
+        assertTrue(harness.serverResponses.isEmpty())
+        assertEquals(0, harness.rpcLog.count { it.first == "session.interrupt" || it.first == "prompt.submit" })
+        nextRecovery.handle!!.detach()
+        harness.recoveryOpenRequests = buildJsonArray { add(frame) }
+        val retry = Recorder()
+        client.recoverTurn("desktop-old", "live-old", retry.callbacks, androidOwned = false,
+            onHandle = { true }).getOrThrow()
+        awaitCondition { retry.interactions.size == 1 }
     }
 
     @Test
