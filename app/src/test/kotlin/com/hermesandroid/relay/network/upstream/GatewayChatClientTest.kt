@@ -2225,6 +2225,8 @@ class GatewayChatClientTest {
         harness.awaitRpc("prompt.submit")
 
         val resume = harness.awaitRpc("session.resume")
+        assertEquals(true, (resume["omit_messages"] as? JsonPrimitive)?.booleanOrNull)
+        assertEquals(true, (resume["defer_history"] as? JsonPrimitive)?.booleanOrNull)
         assertEquals("webui", (resume["source"] as? JsonPrimitive)?.contentOrNull)
         assertEquals(
             "20260101_010101_aaaaaa",
@@ -2505,6 +2507,7 @@ class GatewayChatClientTest {
         val ws2 = harness.awaitServerSocket()
         assertTrue("reconnect must mint a fresh ticket", harness.ticketMints.get() >= 2)
         val activate = harness.awaitRpc("session.activate")
+        assertEquals(true, (activate["omit_messages"] as? JsonPrimitive)?.booleanOrNull)
         assertEquals("live-1", (activate["session_id"] as? JsonPrimitive)?.contentOrNull)
 
         ws2.send(
@@ -4640,6 +4643,8 @@ class GatewayChatClientTest {
         assertNotNull(recovery.handle)
         assertEquals(1, harness.rpcLog.count { it.first == "session.activate" })
         assertEquals(0, harness.rpcLog.count { it.first == "session.resume" })
+        val activate = harness.awaitRpc("session.activate")
+        assertEquals(true, (activate["omit_messages"] as? JsonPrimitive)?.booleanOrNull)
 
         val serverWs = harness.awaitServerSocket()
         serverWs.send(
@@ -4711,6 +4716,9 @@ class GatewayChatClientTest {
         assertNotNull(recovery.handle)
         assertEquals(1, harness.rpcLog.count { it.first == "session.activate" })
         assertEquals(1, harness.rpcLog.count { it.first == "session.resume" })
+        val resume = harness.awaitRpc("session.resume")
+        assertEquals(true, (resume["omit_messages"] as? JsonPrimitive)?.booleanOrNull)
+        assertEquals(true, (resume["defer_history"] as? JsonPrimitive)?.booleanOrNull)
 
         val serverWs = harness.awaitServerSocket()
         serverWs.send(

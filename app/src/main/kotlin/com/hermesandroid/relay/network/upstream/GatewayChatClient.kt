@@ -1470,6 +1470,7 @@ class GatewayChatClient(
                     "session.activate",
                     buildJsonObject {
                         put("session_id", preferredLiveId)
+                        put("omit_messages", true)
                     },
                 )
                 response = activated.getOrNull()
@@ -1495,6 +1496,8 @@ class GatewayChatClient(
                         "session.resume",
                         buildJsonObject {
                             put("session_id", storedId)
+                            put("defer_history", true)
+                            put("omit_messages", true)
                             put("cols", DEFAULT_COLS)
                             put("source", sessionSource)
                             requestedProfile?.let { put("profile", it) }
@@ -3679,6 +3682,8 @@ class GatewayChatClient(
                 "session.resume",
                 buildJsonObject {
                     put("session_id", requestedStoredId)
+                    put("defer_history", true)
+                    put("omit_messages", true)
                     put("cols", DEFAULT_COLS)
                     put("source", sessionSource)
                     requestedProfile?.let { put("profile", it) }
@@ -4559,7 +4564,10 @@ class GatewayChatClient(
                     liveSessionId = preservedLiveId
                     val activated = rpc(
                         "session.activate",
-                        buildJsonObject { put("session_id", preservedLiveId) },
+                        buildJsonObject {
+                            put("session_id", preservedLiveId)
+                            put("omit_messages", true)
+                        },
                     )
                     when {
                         activated.isSuccess -> {
