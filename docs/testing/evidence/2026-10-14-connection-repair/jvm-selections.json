@@ -1,0 +1,185 @@
+{
+  "1": [
+    {
+      "class": "com.hermesandroid.relay.network.upstream.GatewayChatClientTest",
+      "method": "recoverTurn activates exact live session and continues deltas and tool events",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.GatewayChatClientTest",
+      "method": "existing session id is resumed not recreated",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.GatewayChatClientTest",
+      "method": "recoverTurn falls back to durable resume when activate is unsupported",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.GatewayChatClientTest",
+      "method": "socket loss mid-turn activates original session without resume and completes",
+      "result": "passed"
+    }
+  ],
+  "2": [
+    {
+      "class": "com.hermesandroid.relay.network.upstream.DashboardApiClientTest",
+      "method": "getSessionMessages_latestUsesOneBoundedPage",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.DashboardApiClientTest",
+      "method": "getSessionMessages_scopesToProfileAndParsesUpstreamEnvelope",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest",
+      "method": "cancellation is never converted to an empty transcript",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest",
+      "method": "complete history pages oldest first without gaps",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest",
+      "method": "latest mode makes exactly one bounded latest request",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest",
+      "method": "legacy envelope is accepted as one complete response",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest",
+      "method": "exact 500 requests one terminal page and returns no duplicates",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest",
+      "method": "payload safety bound fails clearly before another page",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest",
+      "method": "recent refresh keeps older rows only through exact overlap",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest",
+      "method": "older history requests one earlier latest window",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest",
+      "method": "passiveHistoryRefreshShowsLoadingAndKeepsTranscriptOnFailure",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest",
+      "method": "staleHistoryReadCannotEraseATurnCompletedDuringTheFetch",
+      "result": "passed"
+    }
+  ],
+  "3": [
+    {
+      "class": "com.hermesandroid.relay.network.upstream.GatewayChatClientTest",
+      "method": "input review admits replay before callbacks and stays desktop owned",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.GatewayChatClientTest",
+      "method": "active snapshot accepts optional sanitized pending identities",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.GatewayChatClientTest",
+      "method": "rejected input review drops buffered asks without replying in the next owner",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.network.upstream.GatewayChatClientTest",
+      "method": "input review rejects stale admission without delivering or interrupting",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.notifications.InteractionRequestNotifierTest",
+      "method": "copyAndPublicVersionNeverExposePromptCommandOrSecretMetadata",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.notifications.InteractionRequestNotifierTest",
+      "method": "resolvedOrExpiredRequestCancelsOnlyItsStableSlot",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.notifications.InteractionRequestNotifierTest",
+      "method": "missingAndroidPermissionSkipsPosting",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.notifications.InteractionRequestNotifierTest",
+      "method": "backgroundAndSettingAndPermissionGatesAreExplicit",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.notifications.InteractionRequestNotifierTest",
+      "method": "appRelaunchCleanupRemovesOnlyInteractionChannelNotifications",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.notifications.InteractionRequestNotifierTest",
+      "method": "newInputChannelEnablesVibration",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.notifications.InteractionRequestNotifierTest",
+      "method": "ownedInputTapRequestsReviewWhileOrdinaryConversationTapStaysPassive",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.notifications.InteractionRequestNotifierTest",
+      "method": "existingInputChannelKeepsUserVibrationPreference",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.notifications.InteractionRequestNotifierTest",
+      "method": "requestReplayReplacesOneNotificationAndDeepLinksToExactSession",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.notifications.InteractionRequestNotifierTest",
+      "method": "sameStoredSessionInTwoProfilesKeepsIndependentNotificationSlots",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest",
+      "method": "inputNotificationReviewRejectsWrongOwnerAndSupervision",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest",
+      "method": "desktopPendingSnapshotAlertsWithoutClaimingOrAnsweringRequest",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest",
+      "method": "inputNotificationReviewReplaysCardWithoutInventingPhoneTurn",
+      "result": "passed"
+    }
+  ],
+  "5": [
+    {
+      "class": "com.hermesandroid.relay.network.upstream.GatewayChatClientTest",
+      "method": "active snapshot child count is optional and nonnegative",
+      "result": "passed"
+    },
+    {
+      "class": "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest",
+      "method": "observedSubagentCountStaysWithExactOwnerAndClearsWhenUnavailable",
+      "result": "passed"
+    }
+  ]
+}

@@ -1,0 +1,398 @@
+diff --git a/app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/GatewayForegroundRecoveryInstrumentedTest.kt b/app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/GatewayForegroundRecoveryInstrumentedTest.kt
+index 48a7760e..2a02790f 100644
+--- a/app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/GatewayForegroundRecoveryInstrumentedTest.kt
++++ b/app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/GatewayForegroundRecoveryInstrumentedTest.kt
+@@ -727,6 +727,12 @@ internal class AndroidGatewayContractFixture {
+     @Volatile
+     var profileName: String = "default"
+ 
++    @Volatile var historyRows: kotlinx.serialization.json.JsonArray? = null
++    @Volatile var historyGate: java.util.concurrent.CountDownLatch? = null
++    @Volatile var historyStatus: Int = 200
++    @Volatile var activeSnapshot: kotlinx.serialization.json.JsonArray? = null
++    val historyCapClosures = AtomicInteger(0)
++
+     private val listener = object : WebSocketListener() {
+         override fun onOpen(webSocket: WebSocket, response: Response) {
+             sockets.add(webSocket)
+@@ -743,12 +749,13 @@ internal class AndroidGatewayContractFixture {
+             rpcLog.add(method to params)
+ 
+             val result = when (method) {
+-                "session.resume" -> sessionSnapshot("fixture-live-1")
++                "session.resume" -> sessionSnapshot("fixture-live-1", params)
+                 "session.activate" -> sessionSnapshot(
+                     (params["session_id"] as? JsonPrimitive)?.contentOrNull ?: "fixture-live-1",
++                    params,
+                 )
+                 "session.active_list" -> buildJsonObject {
+-                    put("sessions", kotlinx.serialization.json.buildJsonArray {
++                    put("sessions", activeSnapshot ?: kotlinx.serialization.json.buildJsonArray {
+                         activeSessionStatus?.let { status ->
+                             add(buildJsonObject {
+                                 put("id", LIVE_SESSION_ID)
+@@ -768,6 +775,11 @@ internal class AndroidGatewayContractFixture {
+                 "prompt.submit", "session.interrupt" -> buildJsonObject { put("ok", true) }
+                 else -> JsonObject(emptyMap())
+             }
++            if (result.toString().toByteArray().size > 4 * 1024 * 1024) {
++                historyCapClosures.incrementAndGet()
++                webSocket.close(1009, "Synthetic historical frame exceeds transport cap")
++                return
++            }
+             webSocket.send(
+                 buildJsonObject {
+                     put("jsonrpc", "2.0")
+@@ -796,6 +808,24 @@ internal class AndroidGatewayContractFixture {
+                         .setResponseCode(401)
+                         .setHeader("Content-Type", "application/json")
+                         .setBody(historyFailureBody.orEmpty())
++                    path.startsWith("/api/sessions/") && path.contains("/messages") && historyRows != null -> {
++                        historyGate?.let { check(it.await(15, TimeUnit.SECONDS)) }
++                        val url = requireNotNull(request.requestUrl)
++                        val limit = url.queryParameter("limit")?.toIntOrNull() ?: 500
++                        val offset = url.queryParameter("offset")?.toIntOrNull() ?: 0
++                        val rows = requireNotNull(historyRows).toList()
++                        val page = if (url.queryParameter("order") == "latest") rows.dropLast(offset.coerceAtMost(rows.size)).takeLast(limit)
++                            else rows.drop(offset).take(limit)
++                        MockResponse().setResponseCode(historyStatus).setHeader("Content-Type", "application/json")
++                            .setBody(buildJsonObject {
++                                put("messages", kotlinx.serialization.json.JsonArray(page))
++                                put("profile", profileName)
++                                put("pagination", buildJsonObject {
++                                    put("limit", limit); put("offset", offset); put("returned", page.size)
++                                    put("order", url.queryParameter("order") ?: "latest")
++                                })
++                            }.toString())
++                    }
+                     else -> MockResponse().setResponseCode(404)
+                 }
+             }
+@@ -803,12 +833,16 @@ internal class AndroidGatewayContractFixture {
+         server.start()
+     }
+ 
+-    private fun sessionSnapshot(sessionId: String): JsonObject = buildJsonObject {
++    private fun sessionSnapshot(sessionId: String, params: JsonObject): JsonObject = buildJsonObject {
+         put("session_id", sessionId)
+         put("running", recoveryRunning)
+         put("open_requests", openRequests)
+         put("status", if (recoveryRunning) "streaming" else "idle")
+         put("info", buildJsonObject { put("profile_name", profileName) })
++        historyRows?.let { rows ->
++            put("messages", if ((params["omit_messages"] as? JsonPrimitive)?.contentOrNull == "true")
++                kotlinx.serialization.json.JsonArray(emptyList()) else rows)
++        }
+     }
+ 
+     fun event(type: String, payload: JsonObject?, sessionId: String?): String =
+diff --git a/app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/RelayConnectionRepairInstrumentedTest.kt b/app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/RelayConnectionRepairInstrumentedTest.kt
+new file mode 100644
+index 00000000..5096ea4f
+--- /dev/null
++++ b/app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/RelayConnectionRepairInstrumentedTest.kt
+@@ -0,0 +1,304 @@
++package com.hermesandroid.relay.viewmodel
++
++import android.Manifest
++import android.app.Application
++import android.app.NotificationManager
++import android.app.PendingIntent
++import android.content.Intent
++import android.graphics.Bitmap
++import android.net.Uri
++import android.os.Bundle
++import android.os.Handler
++import android.os.Looper
++import android.os.ParcelFileDescriptor
++import androidx.activity.ComponentActivity
++import androidx.compose.material3.SnackbarHostState
++import androidx.compose.runtime.CompositionLocalProvider
++import androidx.compose.runtime.remember
++import androidx.compose.ui.test.assertIsDisplayed
++import androidx.compose.ui.test.hasScrollToIndexAction
++import androidx.compose.ui.test.hasText
++import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
++import androidx.compose.ui.test.onNodeWithText
++import androidx.compose.ui.test.onRoot
++import androidx.compose.ui.test.printToLog
++import androidx.compose.ui.test.performScrollToNode
++import androidx.lifecycle.Lifecycle
++import androidx.lifecycle.ViewModelStore
++import androidx.test.platform.app.InstrumentationRegistry
++import com.hermesandroid.relay.MainActivity
++import com.hermesandroid.relay.R
++import com.hermesandroid.relay.data.AgentDisplay
++import com.hermesandroid.relay.data.Profile
++import com.hermesandroid.relay.network.upstream.ChatHandler
++import com.hermesandroid.relay.network.upstream.DashboardApiClient
++import com.hermesandroid.relay.network.upstream.GatewayChatClient
++import com.hermesandroid.relay.network.upstream.GatewayConnectionState
++import com.hermesandroid.relay.notifications.ChatNotificationTarget
++import com.hermesandroid.relay.ui.LocalSnackbarHost
++import com.hermesandroid.relay.ui.components.LocalMessageActionHost
++import com.hermesandroid.relay.ui.components.avatar.LocalBackgroundVisualizationEnabled
++import com.hermesandroid.relay.ui.screens.ChatScreen
++import com.hermesandroid.relay.ui.theme.HermesRelayTheme
++import com.hermesandroid.relay.util.AppForegroundTracker
++import kotlinx.coroutines.CoroutineScope
++import kotlinx.coroutines.Dispatchers
++import kotlinx.coroutines.SupervisorJob
++import kotlinx.coroutines.cancel
++import kotlinx.coroutines.launch
++import kotlinx.serialization.json.JsonArray
++import kotlinx.serialization.json.JsonObject
++import kotlinx.serialization.json.JsonPrimitive
++import kotlinx.serialization.json.buildJsonObject
++import kotlinx.serialization.json.put
++import okhttp3.OkHttpClient
++import org.junit.After
++import org.junit.Assert.assertEquals
++import org.junit.Assert.assertNull
++import org.junit.Assert.assertTrue
++import org.junit.Before
++import org.junit.Rule
++import org.junit.Test
++import java.util.concurrent.CountDownLatch
++import java.util.concurrent.TimeUnit
++import java.io.File
++
++/** Four provider-free Android checks for the repaired connection paths, using production Chat UI. */
++class RelayConnectionRepairInstrumentedTest {
++    @get:Rule val compose = createAndroidComposeRule<ComponentActivity>()
++
++    private lateinit var fixture: AndroidGatewayContractFixture
++    private lateinit var scope: CoroutineScope
++    private lateinit var client: GatewayChatClient
++    private lateinit var dashboard: DashboardApiClient
++    private lateinit var handler: ChatHandler
++    private lateinit var vm: ChatViewModel
++    private lateinit var connection: ConnectionViewModel
++    private lateinit var voice: VoiceViewModel
++    private lateinit var app: Application
++    private val store = ViewModelStore()
++    private val profile = Profile(name = PROFILE, model = "synthetic", description = "Synthetic profile")
++    private val target = ChatNotificationTarget(CONNECTION, PROFILE, STORED)
++
++    @Before fun setUp() {
++        app = InstrumentationRegistry.getInstrumentation().targetContext.applicationContext as Application
++        val grant = InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(
++            "pm grant ${app.packageName} ${Manifest.permission.POST_NOTIFICATIONS}",
++        )
++        ParcelFileDescriptor.AutoCloseInputStream(grant).bufferedReader().use { reader ->
++            assertTrue("Synthetic test notification permission grant failed", reader.readText().isBlank())
++        }
++        fixture = AndroidGatewayContractFixture().also { it.profileName = PROFILE; it.historyRows = history(0) }
++        scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
++        val http = OkHttpClient()
++        dashboard = DashboardApiClient(fixture.server.url("/").toString().trimEnd('/'), http)
++        client = GatewayChatClient(dashboard, okHttpClient = http,
++            callbackDispatcher = { block -> Handler(Looper.getMainLooper()).post(block) }, scope = scope)
++        // Bind the requested saved session only after each test installs its own history.
++        handler = ChatHandler()
++        compose.runOnUiThread {
++            vm = ChatViewModel().also {
++                it.initializeGatewayOnly(app)
++                it.initialize(null, handler)
++                it.streamingEndpoint = "gateway"
++                it.setSelectedProfileProvider { profile }
++                it.setSessionProfileNameProvider { PROFILE }
++                it.setProfileMessageLoaderWithMode { owner, session, mode -> dashboard.getSessionMessages(session, owner, mode) }
++                it.updateGatewayClient(client)
++            }
++            connection = ConnectionViewModel(app).also { it.setStreamingEndpoint("gateway") }
++            voice = VoiceViewModel(app)
++            store.put("chat", vm); store.put("connection", connection); store.put("voice", voice)
++        }
++        waitFor { connection.streamingEndpoint.value == "gateway" }
++        compose.setContent {
++            val snackbarHost = remember { SnackbarHostState() }
++            val messageActionHost = remember { SnackbarHostState() }
++            // The unrelated procedural sphere never idles under Compose's automatic clock.
++            CompositionLocalProvider(LocalSnackbarHost provides snackbarHost,
++                LocalMessageActionHost provides messageActionHost,
++                LocalBackgroundVisualizationEnabled provides false) {
++                HermesRelayTheme(themePreference = "dark") {
++                    ChatScreen(vm, connection, voice)
++                }
++            }
++        }
++    }
++
++    @After fun tearDown() {
++        fixture.historyGate?.countDown()
++        compose.runOnUiThread { vm.updateGatewayClient(null); store.clear() }
++        client.shutdown(); scope.cancel(); dashboard.shutdown(); fixture.shutdown()
++        app.getSystemService(NotificationManager::class.java).cancelAll()
++    }
++
++    @Test fun largeHistoryAttachment_survivesTransportCapAndSends() {
++        fixture.historyRows = history(1_500, reasoningChars = 3_500)
++        assertTrue(fixture.historyRows.toString().toByteArray().size > 4 * 1024 * 1024)
++        openConversation()
++        compose.runOnUiThread { vm.sendMessage("Synthetic continuation") }
++        fixture.awaitRpc("prompt.submit")
++        val socket = fixture.awaitServerSocket()
++        socket.send(fixture.event("message.start", null, LIVE))
++        // Persist the completed transcript before the terminal event, as the real server does.
++        fixture.historyRows = JsonArray(requireNotNull(fixture.historyRows).toList() + buildJsonObject {
++            put("id", "synthetic-completed-response"); put("session_id", STORED); put("role", "assistant")
++            put("content", "Synthetic response"); put("timestamp", 1_501.0)
++        })
++        socket.send(fixture.event("message.complete", buildJsonObject { put("text", "Synthetic response") }, LIVE))
++        waitFor { !handler.isStreaming.value && handler.messages.value.any { it.content == "Synthetic response" } }
++        assertEquals(0, fixture.historyCapClosures.get())
++        assertEquals(GatewayConnectionState.Ready, client.connectionState.value)
++        assertEquals(1, fixture.rpcCount("prompt.submit"))
++        assertEquals(0, fixture.rpcCount("session.interrupt"))
++        try {
++            // This client-boundary send bypasses ChatScreen's send button/follow reducer.
++            // Scroll as a reader would to prove the received reply renders without testing auto-follow.
++            compose.onNode(hasScrollToIndexAction()).performScrollToNode(hasText("Synthetic response", substring = true))
++            compose.onNodeWithText("Synthetic response", substring = true).assertIsDisplayed()
++        } catch (failure: Throwable) {
++            val instrument = InstrumentationRegistry.getInstrumentation()
++            compose.onRoot(useUnmergedTree = true).printToLog("RepairRuntimeSemantics")
++            val screenshot = File(app.filesDir, "repair-runtime-issue1.png")
++            instrument.uiAutomation.takeScreenshot()?.let { bitmap ->
++                screenshot.outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }
++                bitmap.recycle()
++            }
++            val detail = "owner=${vm.conversationBinding.value}; session=${handler.currentSessionId.value}; " +
++                "vmTail=${vm.messages.value.takeLast(4).map { it.id to it.content.take(80) }}; " +
++                "handlerTail=${handler.messages.value.takeLast(4).map { it.id to it.content.take(80) }}; " +
++                "screenshot=${screenshot.absolutePath}"
++            instrument.sendStatus(0, Bundle().apply { putString("repair_diagnostic", detail) })
++            throw failure
++        }
++    }
++
++    @Test fun recentHistory_refreshShowsLoadingErrorAndRetainsTranscript() {
++        fixture.historyRows = history(80)
++        openConversation()
++        assertEquals(50, handler.messages.value.size)
++        assertTrue(fixture.historyRequestPaths().all { Uri.parse("http://fixture$it").getQueryParameter("limit") == "50" })
++        compose.onNodeWithText("History row 79", substring = true).assertIsDisplayed()
++        val gate = CountDownLatch(1)
++        fixture.historyGate = gate
++        fixture.historyStatus = 503
++        fixture.activeSnapshot = snapshot()
++        compose.runOnUiThread { vm.requestSessionActivityRefresh() }
++        waitFor { vm.isRefreshingHistory.value }
++        compose.onNodeWithText(app.getString(R.string.chat_loading_messages)).assertIsDisplayed()
++        compose.onNodeWithText("History row 79", substring = true).assertIsDisplayed()
++        gate.countDown()
++        waitFor { vm.chatFailure.value != null && !vm.isRefreshingHistory.value }
++        compose.onNodeWithText(app.getString(R.string.chat_failure_title)).assertIsDisplayed()
++        compose.onNodeWithText("History row 79", substring = true).assertIsDisplayed()
++        fixture.historyGate = null
++        fixture.historyStatus = 200
++        compose.runOnUiThread { vm.requestSessionActivityRefresh() }
++        waitFor { vm.chatFailure.value == null && !vm.isRefreshingHistory.value }
++        compose.onNodeWithText(app.getString(R.string.chat_failure_title)).assertDoesNotExist()
++    }
++
++    @Test fun desktopInput_postsOwnedNotificationAndReviewRendersAuthenticatedCard() {
++        fixture.historyRows = history(1)
++        openConversation()
++        fixture.activeSnapshot = snapshot(pending = true)
++        client.setKeepAliveInBackground(true)
++        val controlCount = fixture.rpcCount("session.resume") + fixture.rpcCount("session.activate") + fixture.rpcCount("prompt.submit")
++        compose.activityRule.scenario.moveToState(Lifecycle.State.CREATED)
++        waitFor { !AppForegroundTracker.isForeground.value }
++        InstrumentationRegistry.getInstrumentation().runOnMainSync { vm.setChatVisible(false); vm.requestSessionActivityRefresh() }
++        val manager = app.getSystemService(NotificationManager::class.java)
++        waitFor { manager.activeNotifications.size == 1 }
++        val notification = manager.activeNotifications.single()
++        assertTrue(notification.tag.contains(target.key))
++        val channel = manager.getNotificationChannel(notification.notification.channelId)
++        assertEquals(NotificationManager.IMPORTANCE_HIGH, channel.importance)
++        assertTrue(channel.shouldVibrate())
++        assertNull(vm.pendingAsk.value)
++        assertEquals(controlCount, fixture.rpcCount("session.resume") + fixture.rpcCount("session.activate") + fixture.rpcCount("prompt.submit"))
++        val key = "${target.key}:APPROVAL:${Uri.encode(REQUEST)}"
++        val tap = Intent(app, MainActivity::class.java).apply {
++            data = Uri.Builder().scheme("hermes-relay").authority("interaction").appendPath(key).build()
++        }
++        assertEquals(PendingIntent.getActivity(app, key.hashCode(), tap,
++            PendingIntent.FLAG_NO_CREATE or PendingIntent.FLAG_IMMUTABLE), notification.notification.contentIntent)
++        fixture.recoveryRunning = true
++        fixture.openRequests = JsonArray(listOf(buildJsonObject {
++            put("id", REQUEST); put("method", "approval")
++            put("params", buildJsonObject {
++                put("session_id", LIVE); put("request_id", "synthetic-approval")
++                put("command", "echo synthetic-review"); put("description", "Synthetic review")
++                put("choices", JsonArray(listOf(JsonPrimitive("once"), JsonPrimitive("deny"))))
++            })
++        }))
++        compose.activityRule.scenario.moveToState(Lifecycle.State.RESUMED)
++        compose.runOnUiThread { openOwner(); scope.launch(Dispatchers.Main) { vm.reviewPendingInput(target) } }
++        waitFor { vm.pendingAsk.value != null }
++        compose.onNodeWithText("echo synthetic-review", substring = true).assertIsDisplayed()
++        assertEquals(0, fixture.rpcCount("prompt.submit"))
++        assertTrue(fixture.serverResponses.isEmpty())
++    }
++
++    @Test fun observedSubagents_renderOnlyCurrentConversationAndClearOnSwitch() {
++        fixture.historyRows = history(1)
++        openConversation()
++        fixture.activeSnapshot = snapshot(children = 3)
++        compose.runOnUiThread { vm.requestSessionActivityRefresh() }
++        waitFor { vm.observedSubagentCount.value == 3 }
++        val label = app.getString(R.string.chat_working_with_subagents, 3)
++        compose.onNodeWithText(label).assertIsDisplayed()
++        fixture.activeSnapshot = snapshot(session = "foreign-conversation", children = 9)
++        compose.runOnUiThread { vm.requestSessionActivityRefresh() }
++        waitFor { vm.observedSubagentCount.value == 0 }
++        compose.onNodeWithText(label).assertDoesNotExist()
++        fixture.activeSnapshot = snapshot(children = 3)
++        compose.runOnUiThread { vm.requestSessionActivityRefresh() }
++        waitFor { vm.observedSubagentCount.value == 3 }
++        compose.runOnUiThread { vm.switchProfileContext(AgentDisplay.profileContextKey("other-connection", PROFILE), "other-conversation") }
++        waitFor { vm.observedSubagentCount.value == 0 }
++        compose.onNodeWithText(label).assertDoesNotExist()
++    }
++
++    private fun openOwner() = vm.openProfileSession(PROFILE, profile,
++        AgentDisplay.profileContextKey(CONNECTION, PROFILE), STORED)
++
++    private fun openConversation() {
++        val expectedRows = requireNotNull(fixture.historyRows)
++        val expectedTail = ((expectedRows.last() as JsonObject)["content"] as JsonPrimitive).content
++        val expectedCount = minOf(expectedRows.size, 50)
++        compose.runOnUiThread { assertTrue(openOwner()) }
++        waitFor {
++            !vm.isLoadingHistory.value && !vm.isRefreshingHistory.value &&
++                handler.currentSessionId.value == STORED && handler.messages.value.size == expectedCount &&
++                handler.messages.value.lastOrNull()?.content == expectedTail &&
++                client.connectionState.value == GatewayConnectionState.Ready
++        }
++    }
++
++    private fun history(size: Int, reasoningChars: Int = 0) = JsonArray(List(size) { index -> buildJsonObject {
++        put("id", "history-$index"); put("session_id", STORED); put("role", "assistant")
++        put("content", "History row $index"); put("timestamp", index.toDouble())
++        if (reasoningChars > 0) put("reasoning_content", "r".repeat(reasoningChars))
++    } })
++
++    private fun snapshot(session: String = STORED, children: Int = 0, pending: Boolean = false) = JsonArray(listOf(buildJsonObject {
++        put("id", LIVE); put("session_key", session); put("profile", PROFILE)
++        put("status", if (pending) "waiting" else "working"); put("last_active", 1.0)
++        put("active_subagent_count", children)
++        if (pending) put("pending_inputs", JsonArray(listOf(buildJsonObject { put("id", REQUEST); put("method", "approval") })))
++    }))
++
++    private fun waitFor(condition: () -> Boolean) {
++        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
++        while (System.nanoTime() < deadline) { if (condition()) return; Thread.sleep(25) }
++        assertTrue("Synthetic Android repair condition did not settle", condition())
++    }
++
++    private companion object {
++        const val PROFILE = "repair-profile"
++        const val CONNECTION = "fixture-connection"
++        const val STORED = "20260821_120000_fixture"
++        const val LIVE = "fixture-live-1"
++        const val REQUEST = "srq-review-runtime"
++    }
++}
