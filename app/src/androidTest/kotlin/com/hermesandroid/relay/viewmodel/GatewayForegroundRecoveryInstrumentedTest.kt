@@ -722,6 +722,12 @@ internal class AndroidGatewayContractFixture {
     var activeSessionStatus: String? = null
 
     @Volatile
+    var activeSubagentCount: Int? = null
+
+    @Volatile
+    var activeListUnavailable: Boolean = false
+
+    @Volatile
     var historyFailureBody: String? = null
 
     @Volatile
@@ -745,6 +751,13 @@ internal class AndroidGatewayContractFixture {
             val params = frame["params"] as? JsonObject ?: JsonObject(emptyMap())
             rpcLog.add(method to params)
 
+            if (method == "session.active_list" && activeListUnavailable) {
+                webSocket.send(buildJsonObject {
+                    put("jsonrpc", "2.0"); put("id", id)
+                    put("error", buildJsonObject { put("code", -32601); put("message", "unsupported") })
+                }.toString())
+                return
+            }
             val result = when (method) {
                 "commands.catalog" -> if (slashCommandResult == null) JsonObject(emptyMap()) else buildJsonObject {
                     put("pairs", json.parseToJsonElement("""[["/goal","Manage goal"]]"""))
@@ -762,6 +775,7 @@ internal class AndroidGatewayContractFixture {
                                 put("session_key", STORED_SESSION_ID)
                                 put("status", status)
                                 put("last_active", 1.0)
+                                activeSubagentCount?.let { put("active_subagent_count", it) }
                             })
                         }
                     })

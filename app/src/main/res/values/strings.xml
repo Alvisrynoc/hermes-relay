@@ -4691,5 +4691,9 @@
     <string name="paired_devices_updating">Updating session…</string>
     <string name="paired_devices_no_shorter_duration">No shorter preset remains. You can revoke this session, or pair again to renew access.</string>
     <string name="chat_load_older_messages">Load older messages</string>
+    <string name="chat_agent_working">Agent working</string>
+    <string name="chat_agent_ready">Agent ready</string>
+    <string name="chat_agent_status_checking">Checking agent status</string>
+    <string name="chat_agent_status_unavailable">Agent status unavailable</string>
     <string name="chat_working_with_subagents">Working with %1$d subagents</string>
 </resources>

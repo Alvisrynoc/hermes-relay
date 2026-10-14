@@ -47,6 +47,7 @@ import com.hermesandroid.relay.data.SessionActivityState
 import com.hermesandroid.relay.data.SessionActivityFreshness
 import com.hermesandroid.relay.data.SessionActivityOwner
 import com.hermesandroid.relay.data.SessionActivityPhase
+import com.hermesandroid.relay.data.SessionActivityRecord
 import com.hermesandroid.relay.data.SessionActivityRegistry
 import com.hermesandroid.relay.data.SessionActivityScope
 import com.hermesandroid.relay.data.SessionActivityUpdate
@@ -511,6 +512,12 @@ class ChatViewModel : ViewModel() {
         _backgroundSessionActivityStates.asStateFlow()
 
     private val sessionActivityRegistry = MutableStateFlow(SessionActivityRegistry())
+    internal val sessionActivities: StateFlow<SessionActivityRegistry> = sessionActivityRegistry.asStateFlow()
+
+    internal fun currentSessionActivity(registry: SessionActivityRegistry): SessionActivityRecord? {
+        if (streamingEndpoint != "gateway" || gatewayClient == null) return null
+        return activityOwner(chatHandler?.currentSessionId?.value)?.let(registry::record)
+    }
     private val sessionActivityGeneration = AtomicLong(0L)
     private val sessionActivityPollMutex = Mutex()
     private var sessionActivityPollJob: Job? = null
@@ -2564,6 +2571,10 @@ class ChatViewModel : ViewModel() {
     private val observedSnapshotInputs = mutableMapOf<String, SnapshotInputHint>()
     private val deliveredSnapshotInputs = mutableSetOf<String>()
     private val _observedSubagentCount = MutableStateFlow(0)
+    private var observedSubagentOwner: SessionActivityOwner? = null
+    internal fun currentSessionSubagentCount(count: Int = _observedSubagentCount.value): Int =
+        count.takeIf { observedSubagentOwner != null &&
+            observedSubagentOwner == activityOwner(chatHandler?.currentSessionId?.value) } ?: 0
     val observedSubagentCount: StateFlow<Int> = _observedSubagentCount.asStateFlow()
 
     private fun clearSnapshotInputHints() {
@@ -2729,6 +2740,7 @@ class ChatViewModel : ViewModel() {
                     )
                     val currentRuntimeIds = resolved.runtimes.filter { it.owner == currentOwner }
                         .mapTo(mutableSetOf()) { it.runtimeId }
+                    observedSubagentOwner = currentOwner
                     _observedSubagentCount.value = result.sessions.filter { it.runtimeSessionId in currentRuntimeIds }
                         .maxOfOrNull { it.activeSubagentCount } ?: 0
                     val scopes = directory.mapTo(mutableSetOf()) {
@@ -2790,7 +2802,8 @@ class ChatViewModel : ViewModel() {
                 record.phase(System.currentTimeMillis()) != SessionActivityPhase.Idle
         }
         val delayMs = if (
-            hasConfirmedLiveWork || hasPassiveCurrentLiveWork || hasPassiveCatchupPending
+            hasConfirmedLiveWork || hasPassiveCurrentLiveWork || hasPassiveCatchupPending ||
+                currentSessionSubagentCount() > 0
         ) 1_500L else 30_000L
         sessionActivityPollJob = viewModelScope.launch {
             delay(delayMs)

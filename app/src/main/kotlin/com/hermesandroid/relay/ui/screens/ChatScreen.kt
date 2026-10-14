@@ -137,6 +137,7 @@ import com.hermesandroid.relay.ui.theme.radialNavyBackground
 import com.hermesandroid.relay.network.upstream.ApiModelOption
 import com.hermesandroid.relay.network.upstream.ChatMode
 import com.hermesandroid.relay.network.upstream.GatewayAvailability
+import com.hermesandroid.relay.network.upstream.GatewayConnectionState
 import com.hermesandroid.relay.network.upstream.ReasoningEfforts
 import com.hermesandroid.relay.network.relay.RelayVoiceClient
 import com.hermesandroid.relay.network.relay.RealtimeVoiceConfig
@@ -194,6 +195,8 @@ import com.hermesandroid.relay.data.MessageRole
 import com.hermesandroid.relay.data.PhysicalKeyboardEnterBehavior
 import com.hermesandroid.relay.data.ProfilePresentationPolicy
 import com.hermesandroid.relay.data.ProactiveInboxEntry
+import com.hermesandroid.relay.data.SessionActivityFreshness
+import com.hermesandroid.relay.data.SessionActivityPhase
 import com.hermesandroid.relay.data.SessionActivityState
 import com.hermesandroid.relay.data.SupervisedAttachmentCategory
 import com.hermesandroid.relay.data.SupervisedModePolicy
@@ -1018,6 +1021,9 @@ fun ChatScreen(
     val isLoadingHistory by chatViewModel.isLoadingHistory.collectAsState()
     val isRefreshingHistory by chatViewModel.isRefreshingHistory.collectAsState()
     val observedSubagentCount by chatViewModel.observedSubagentCount.collectAsState()
+    val ownedSubagentCount = chatViewModel.currentSessionSubagentCount(observedSubagentCount)
+    val sessionActivities by chatViewModel.sessionActivities.collectAsState()
+    val observedActivity = chatViewModel.currentSessionActivity(sessionActivities)
     val hasOlderHistory by chatViewModel.hasOlderHistory.collectAsState()
     val isLoadingOlderHistory by chatViewModel.isLoadingOlderHistory.collectAsState()
     val historyHeaderItems = if ((hasOlderHistory || isLoadingOlderHistory) && chatViewModel.streamingEndpoint == "gateway") 2 else 1
@@ -3355,9 +3361,28 @@ fun ChatScreen(
             // are reached from Settings (Settings → Hermes management / Bridge);
             // Terminal + Settings remain quick icons in the top app bar above.
 
-            if (observedSubagentCount > 0 && (!supervised || supervisedVisibility.showToolNames)) {
+            if (chatViewModel.streamingEndpoint == "gateway" && currentSessionId != null &&
+                (!supervised || supervisedVisibility.showWorkingStatus)) {
+                val observedPhase = observedActivity?.phase(System.currentTimeMillis())
+                val activityText = when {
+                    gatewaySocketState != GatewayConnectionState.Ready ||
+                        observedActivity?.freshness == SessionActivityFreshness.Unavailable ->
+                        stringResource(R.string.chat_agent_status_unavailable)
+                    observedActivity == null || observedActivity.freshness != SessionActivityFreshness.Confirmed ->
+                        stringResource(R.string.chat_agent_status_checking)
+                    observedPhase == SessionActivityPhase.NeedsInput ->
+                        stringResource(R.string.drawer_activity_needs_input)
+                    ownedSubagentCount > 0 -> if (!supervised || supervisedVisibility.showToolNames) {
+                        stringResource(R.string.chat_working_with_subagents, ownedSubagentCount)
+                    } else stringResource(R.string.chat_agent_working)
+                    observedPhase == SessionActivityPhase.Starting ->
+                        stringResource(R.string.drawer_activity_starting)
+                    observedPhase == SessionActivityPhase.Working || observedPhase == SessionActivityPhase.BackgroundWork ->
+                        stringResource(R.string.chat_agent_working)
+                    else -> stringResource(R.string.chat_agent_ready)
+                }
                 Text(
-                    text = stringResource(R.string.chat_working_with_subagents, observedSubagentCount),
+                    text = activityText,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

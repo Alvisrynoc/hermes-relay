@@ -4578,6 +4578,35 @@ class ChatViewModelGatewayInboundTurnTest {
     }
 
     @Test
+    fun idleParentWithObservedChildrenPollsCompletionAtBusyCadence() {
+        // The shared harness otherwise supplies a running process, a separate busy overlay.
+        gatewayHarness.methodNotFound += "process.list"
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        fun snapshot(count: Int) = buildJsonObject {
+            put("sessions", buildJsonArray { add(buildJsonObject {
+                put("id", "live-resumed"); put("session_key", STORED_SESSION_ID)
+                put("status", "idle"); put("last_active", 1.0)
+                put("active_subagent_count", count)
+            }) })
+        }
+        gatewayHarness.activeSessionListPayload = snapshot(3)
+        viewModel.setChatVisible(true)
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 3 }
+        gatewayHarness.activeSessionListPayload = snapshot(0)
+        // Do not request a refresh: owned children must retain the existing busy poll cadence.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (System.nanoTime() < deadline && viewModel.observedSubagentCount.value != 0) {
+            shadowOf(Looper.getMainLooper()).idleFor(25, TimeUnit.MILLISECONDS)
+            Thread.sleep(25)
+        }
+        assertEquals("idle parent left child completion on the 30-second idle poll", 0,
+            viewModel.observedSubagentCount.value)
+        assertFalse(handler.isStreaming.value)
+    }
+
+    @Test
     fun observedSubagentCountStaysWithExactOwnerAndClearsWhenUnavailable() {
         viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
         awaitCondition { !viewModel.isLoadingHistory.value }
@@ -4594,6 +4623,14 @@ class ChatViewModelGatewayInboundTurnTest {
         viewModel.setChatVisible(true)
         viewModel.requestSessionActivityRefresh()
         awaitCondition { viewModel.observedSubagentCount.value == 3 }
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.Working,
+            viewModel.currentSessionActivity(viewModel.sessionActivities.value)?.phase())
+        // Same profile, another stored chat, before any new snapshot arrives.
+        handler.setSessionId("same-profile-other-chat")
+        assertEquals(0, viewModel.currentSessionSubagentCount())
+        assertNull(viewModel.currentSessionActivity(viewModel.sessionActivities.value))
+        handler.setSessionId(STORED_SESSION_ID)
+        assertEquals(3, viewModel.currentSessionSubagentCount())
         gatewayHarness.activeSessionListPayload = snapshot("other-conversation")
         viewModel.requestSessionActivityRefresh()
         awaitCondition { viewModel.observedSubagentCount.value == 0 }
@@ -4602,6 +4639,7 @@ class ChatViewModelGatewayInboundTurnTest {
         awaitCondition { viewModel.observedSubagentCount.value == 3 }
         viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-b", null), "other-conversation")
         assertEquals(0, viewModel.observedSubagentCount.value)
+        assertTrue(viewModel.currentSessionActivity(viewModel.sessionActivities.value)?.owner?.connectionId != "connection-a")
         viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
         awaitCondition { !viewModel.isLoadingHistory.value }
         viewModel.requestSessionActivityRefresh()
@@ -4609,6 +4647,8 @@ class ChatViewModelGatewayInboundTurnTest {
         gatewayHarness.methodNotFound += "session.active_list"
         viewModel.requestSessionActivityRefresh()
         awaitCondition { viewModel.observedSubagentCount.value == 0 }
+        awaitCondition { viewModel.currentSessionActivity(viewModel.sessionActivities.value)?.freshness ==
+            com.hermesandroid.relay.data.SessionActivityFreshness.Unavailable }
     }
 
     @Test
