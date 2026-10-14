@@ -3370,8 +3370,12 @@ fun ChatScreen(
                         stringResource(R.string.chat_agent_status_unavailable)
                     observedActivity == null || observedActivity.freshness != SessionActivityFreshness.Confirmed ->
                         stringResource(R.string.chat_agent_status_checking)
-                    observedPhase == SessionActivityPhase.NeedsInput ->
-                        stringResource(R.string.drawer_activity_needs_input)
+                    observedPhase == SessionActivityPhase.NeedsInput -> {
+                        val needsInput = stringResource(R.string.drawer_activity_needs_input)
+                        if (ownedSubagentCount > 0 && (!supervised || supervisedVisibility.showToolNames)) {
+                            "$needsInput · ${stringResource(R.string.chat_working_with_subagents, ownedSubagentCount)}"
+                        } else needsInput
+                    }
                     ownedSubagentCount > 0 -> if (!supervised || supervisedVisibility.showToolNames) {
                         stringResource(R.string.chat_working_with_subagents, ownedSubagentCount)
                     } else stringResource(R.string.chat_agent_working)

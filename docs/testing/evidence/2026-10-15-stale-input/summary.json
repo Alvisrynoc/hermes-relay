@@ -1,0 +1,46 @@
+{
+  "baseline": "db467847f01408c45a0c85ad0ef871fa4a194486",
+  "unit_red": {
+    "tests": 3,
+    "failures": 1,
+    "passed": 2,
+    "seconds": 0.062,
+    "build": "expected failure; 1m04s",
+    "evidence": "unit-red.xml"
+  },
+  "unit_final": {
+    "tests": 3,
+    "failures": 0,
+    "passed": 3,
+    "seconds": 0.061,
+    "build": "passed; 1m13s",
+    "selectors": [
+      "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWorkingPreservesInputNewerThanSnapshot",
+      "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWorkingClearsOlderPendingInputOnlyForItsOwner",
+      "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWaitingPreservesOlderPendingInput"
+    ],
+    "evidence": "unit-final.xml"
+  },
+  "source_sha256": {
+    "app/src/main/kotlin/com/hermesandroid/relay/data/SessionActivityRegistry.kt": "e04255bf82c35ef153d946a316ea6edadf64a3bb2b5b12fdbec7b4beeb24e0a3",
+    "app/src/main/kotlin/com/hermesandroid/relay/ui/screens/ChatScreen.kt": "26c5cc0284f2f13108b93d124304e30922a92d8994c0064671e33f7fb9442556",
+    "app/src/test/kotlin/com/hermesandroid/relay/data/SessionActivityRegistryTest.kt": "449e620c9d4c3dfc3918c6b95440db118d8f7a2a9bba794922e31fb137d9ba3a",
+    "app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/ObservedChatStatusInstrumentedTest.kt": "7ee65a281a21b10d88d6bb9a2e4bceab9b543fd6d07050b0ba159f5b58668951"
+  },
+  "runtime": {
+    "status": "passed",
+    "level": "system",
+    "selector": "com.hermesandroid.relay.viewmodel.ObservedChatStatusInstrumentedTest#waitingWithChildrenAndStaleInputConvergeToWorking",
+    "tests": 1,
+    "seconds": 8.043,
+    "platform": "Pixel 6 AOSP x86_64 API 36",
+    "apk_build": "passed; 39s; 71 tasks (7 executed, 64 up-to-date)",
+    "apk_sha256": {
+      "sideload/debug/hermes-relay-1.18.1-sideload-debug.apk": "4d5d37eda5310e9a63d231a6b2e42b797f25884a1b051bf75104f7a20d748d93",
+      "androidTest/sideload/debug/hermes-relay-1.18.1-sideload-debug-androidTest.apk": "0a6aa7d7906ef15723419d9da73c6e1b2074a1303c18c0a4e0467b22b4c36858"
+    },
+    "test_only_patch_sha256": "8f3669f1e22b9a5f72ef67f95b3b5e5974eddd45d9d09deefb46a3914dfcdfa9",
+    "evidence": "runtime-final.txt"
+  },
+  "live_state_limit": "No authenticated live pending-request snapshot verified; synthetic reducer reproduction does not prove the reported conversation has no unanswered request."
+}

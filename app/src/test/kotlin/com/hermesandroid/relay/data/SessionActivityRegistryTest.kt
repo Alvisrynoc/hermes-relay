@@ -351,6 +351,45 @@ class SessionActivityRegistryTest {
     }
 
     @Test
+    fun authoritativeWorkingClearsOlderPendingInputOnlyForItsOwner() {
+        val other = owner("connection-a", "Default", "other-session")
+        val state = SessionActivityRegistry()
+            .reduce(live(owner, "runtime-a", SessionLiveStatus.Working, generation = 1))
+            .reduce(openInput(owner, "old-input", generation = 1))
+            .reduce(live(other, "runtime-b", SessionLiveStatus.Working, generation = 1))
+            .reduce(openInput(other, "other-input", generation = 1))
+            .reduce(activeList(scope, generation = 1, complete = false,
+                runtimes = arrayOf(SessionLiveRuntime(owner, "runtime-a", SessionLiveStatus.Working))))
+        assertEquals(SessionActivityPhase.Working, state.record(owner)?.phase())
+        assertTrue(state.record(owner)?.pendingInputs.orEmpty().isEmpty())
+        assertEquals(SessionActivityPhase.NeedsInput, state.record(other)?.phase())
+    }
+
+    @Test
+    fun authoritativeWorkingPreservesInputNewerThanSnapshot() {
+        val opened = SessionActivityRegistry()
+            .reduce(live(owner, "runtime-a", SessionLiveStatus.Working, generation = 1))
+            .reduce(SessionActivityUpdate.PendingInputOpened(owner, "new-input",
+                generation = 1, observedAtMillis = 30))
+        val snapshot = activeList(scope, generation = 1,
+            runtimes = arrayOf(SessionLiveRuntime(owner, "runtime-a", SessionLiveStatus.Working)))
+        val state = opened.reduce(snapshot).reduce(snapshot.copy(observedAtMillis = 21))
+        assertEquals(SessionActivityPhase.NeedsInput, state.record(owner)?.phase())
+        assertTrue("new-input" in state.record(owner)?.pendingInputs.orEmpty())
+    }
+
+    @Test
+    fun authoritativeWaitingPreservesOlderPendingInput() {
+        val state = SessionActivityRegistry()
+            .reduce(live(owner, "runtime-a", SessionLiveStatus.Working, generation = 1))
+            .reduce(openInput(owner, "still-open", generation = 1))
+            .reduce(activeList(scope, generation = 1,
+                runtimes = arrayOf(SessionLiveRuntime(owner, "runtime-a", SessionLiveStatus.Waiting))))
+        assertEquals(SessionActivityPhase.NeedsInput, state.record(owner)?.phase())
+        assertTrue("still-open" in state.record(owner)?.pendingInputs.orEmpty())
+    }
+
+    @Test
     fun `authoritative idle active-list row clears stale pending input`() {
         val state = SessionActivityRegistry()
             .reduce(live(owner, "runtime-a", SessionLiveStatus.Working, generation = 1))

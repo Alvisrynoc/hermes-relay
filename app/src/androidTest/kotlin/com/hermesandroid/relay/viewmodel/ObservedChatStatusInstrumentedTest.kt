@@ -14,6 +14,9 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.lifecycle.ViewModelStore
 import androidx.test.platform.app.InstrumentationRegistry
 import com.hermesandroid.relay.data.AgentDisplay
+import com.hermesandroid.relay.data.SessionActivityRegistry
+import com.hermesandroid.relay.data.SessionActivityUpdate
+import com.hermesandroid.relay.data.SessionActivityPhase
 import com.hermesandroid.relay.data.Profile
 import com.hermesandroid.relay.network.upstream.ChatHandler
 import com.hermesandroid.relay.network.upstream.DashboardApiClient
@@ -30,6 +33,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.serialization.json.JsonPrimitive
 import okhttp3.OkHttpClient
 import org.junit.After
@@ -170,6 +174,39 @@ class ObservedChatStatusInstrumentedTest {
         assertTrue(!handler.isStreaming.value)
         assertEquals(0, fixture.rpcCount("prompt.submit"))
         assertEquals(0, fixture.rpcCount("session.interrupt"))
+    }
+
+    @Test fun waitingWithChildrenAndStaleInputConvergeToWorking() {
+        fixture.activeSessionStatus = "waiting"
+        fixture.activeSubagentCount = 2
+        compose.runOnUiThread { assertTrue(vm.openProfileSession(PROFILE, profile,
+            AgentDisplay.profileContextKey("fixture-connection", PROFILE), STORED)) }
+        waitFor { vm.observedSubagentCount.value == 2 &&
+            vm.currentSessionActivity(vm.sessionActivities.value)?.phase() == SessionActivityPhase.NeedsInput }
+        compose.onNodeWithText("Needs input · Working with 2 subagents").assertIsDisplayed()
+        // Reproduce a retained earlier UI overlay, not a real unanswered server request.
+        compose.runOnUiThread {
+            @Suppress("UNCHECKED_CAST")
+            val records = ChatViewModel::class.java.getDeclaredField("sessionActivityRegistry")
+                .apply { isAccessible = true }.get(vm) as MutableStateFlow<SessionActivityRegistry>
+            val observed = requireNotNull(vm.currentSessionActivity(records.value))
+            records.value = records.value.reduce(SessionActivityUpdate.PendingInputOpened(
+                owner = observed.owner, requestId = "synthetic-stale-input",
+                generation = observed.evidence.generation,
+                observedAtMillis = observed.evidence.observedAtMillis,
+            ))
+        }
+        fixture.activeSessionStatus = "working"
+        compose.runOnUiThread { vm.requestSessionActivityRefresh() }
+        waitFor { vm.currentSessionActivity(vm.sessionActivities.value)?.let {
+            it.phase() == SessionActivityPhase.Working && it.pendingInputs.isEmpty()
+        } == true }
+        compose.onNodeWithText("Working with 2 subagents").assertIsDisplayed()
+        compose.onNodeWithText("Needs input", substring = true).assertDoesNotExist()
+        assertTrue(!handler.isStreaming.value)
+        for (method in listOf("session.resume", "session.activate", "prompt.submit", "session.interrupt")) {
+            assertEquals("readonly status must not answer or control a turn: $method", 0, fixture.rpcCount(method))
+        }
     }
 
     private fun waitFor(condition: () -> Boolean) {

@@ -357,13 +357,18 @@ data class SessionActivityRegistry(
         val observedOwners = resolvedRuntimes.mapTo(mutableSetOf()) { requireNotNull(it.owner) }
         resolvedRuntimes.forEach { runtime ->
             val resolvedOwner = requireNotNull(runtime.owner)
+            val previous = state.records[resolvedOwner]
             state = state.putTurn(
                 resolvedOwner, runtime.runtimeId, runtime.status.phase(), SessionActivityFreshness.Confirmed,
                 SessionActivityEvidenceSource.ActiveList, update.generation, update.observedAtMillis,
             )
-            if (runtime.status == SessionLiveStatus.Idle) {
-                val idleRecord = requireNotNull(state.records[resolvedOwner]).copy(pendingInputs = emptyMap())
-                state = state.copy(records = state.records + (resolvedOwner to idleRecord))
+            val record = requireNotNull(state.records[resolvedOwner])
+            if (previous != null && previous.pendingInputs.isNotEmpty() &&
+                previous.evidence.observedAtMillis >= update.observedAtMillis) {
+                // Keep newer input evidence so another delayed snapshot cannot clear it.
+                state = state.copy(records = state.records + (resolvedOwner to record.copy(evidence = previous.evidence)))
+            } else if (runtime.status == SessionLiveStatus.Idle || runtime.status == SessionLiveStatus.Working) {
+                state = state.copy(records = state.records + (resolvedOwner to record.copy(pendingInputs = emptyMap())))
             }
         }
         val snapshotCanSettle = update.isCompleteForScope && resolvedRuntimes.size == update.runtimes.size
