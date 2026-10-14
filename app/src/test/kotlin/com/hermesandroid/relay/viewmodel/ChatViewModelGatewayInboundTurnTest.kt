@@ -4578,6 +4578,40 @@ class ChatViewModelGatewayInboundTurnTest {
     }
 
     @Test
+    fun observedSubagentCountStaysWithExactOwnerAndClearsWhenUnavailable() {
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        fun snapshot(session: String) = buildJsonObject {
+            put("sessions", buildJsonArray {
+                add(buildJsonObject {
+                    put("id", if (session == STORED_SESSION_ID) "live-resumed" else "foreign-runtime")
+                    put("session_key", session); put("status", "working"); put("last_active", 1.0)
+                    put("active_subagent_count", 3)
+                })
+            })
+        }
+        gatewayHarness.activeSessionListPayload = snapshot(STORED_SESSION_ID)
+        viewModel.setChatVisible(true)
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 3 }
+        gatewayHarness.activeSessionListPayload = snapshot("other-conversation")
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 0 }
+        gatewayHarness.activeSessionListPayload = snapshot(STORED_SESSION_ID)
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 3 }
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-b", null), "other-conversation")
+        assertEquals(0, viewModel.observedSubagentCount.value)
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 3 }
+        gatewayHarness.methodNotFound += "session.active_list"
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 0 }
+    }
+
+    @Test
     fun inputNotificationReviewReplaysCardWithoutInventingPhoneTurn() {
         val checkpointStore = MemoryCheckpointStore()
         viewModel.setChatTurnCheckpointStore(checkpointStore)

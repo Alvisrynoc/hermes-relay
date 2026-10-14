@@ -3686,6 +3686,8 @@ class GatewayChatClient(
                     val method = input.stringField("method") ?: return@mapNotNull null
                     GatewayPendingInput(id, method)
                 }.orEmpty(),
+            activeSubagentCount = (row["active_subagent_count"] as? JsonPrimitive)?.intOrNull
+                ?.coerceAtLeast(0) ?: 0,
         )
     }
 

@@ -1017,6 +1017,7 @@ fun ChatScreen(
     val subagentChildPreview by chatViewModel.subagentChildPreview.collectAsState()
     val isLoadingHistory by chatViewModel.isLoadingHistory.collectAsState()
     val isRefreshingHistory by chatViewModel.isRefreshingHistory.collectAsState()
+    val observedSubagentCount by chatViewModel.observedSubagentCount.collectAsState()
     val hasOlderHistory by chatViewModel.hasOlderHistory.collectAsState()
     val isLoadingOlderHistory by chatViewModel.isLoadingOlderHistory.collectAsState()
     val historyHeaderItems = if ((hasOlderHistory || isLoadingOlderHistory) && chatViewModel.streamingEndpoint == "gateway") 2 else 1
@@ -3354,6 +3355,14 @@ fun ChatScreen(
             // are reached from Settings (Settings → Hermes management / Bridge);
             // Terminal + Settings remain quick icons in the top app bar above.
 
+            if (observedSubagentCount > 0 && (!supervised || supervisedVisibility.showToolNames)) {
+                Text(
+                    text = stringResource(R.string.chat_working_with_subagents, observedSubagentCount),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
             // Keep retained messages visible while showing that the server read is in progress.
             if ((isLoadingHistory || isRefreshingHistory) && !isChatConnecting) {
                 Row(

@@ -2217,6 +2217,24 @@ class GatewayChatClientTest {
     }
 
     @Test
+    fun `active snapshot child count is optional and nonnegative`() = runBlocking {
+        fun payload(count: Int?) = buildJsonObject {
+            put("sessions", JsonArray(listOf(buildJsonObject {
+                put("id", "desktop-runtime")
+                put("session_key", "stored-desktop")
+                put("status", "working")
+                put("last_active", 1.0)
+                count?.let { put("active_subagent_count", it) }
+            })))
+        }
+        for ((wire, expected) in listOf(null to 0, -1 to 0, 3 to 3)) {
+            harness.activeSessionListPayload = payload(wire)
+            val result = client.listActiveSessions() as GatewayActiveSessionsResult.Success
+            assertEquals(expected, result.sessions.single().activeSubagentCount)
+        }
+    }
+
+    @Test
     fun `active snapshot accepts optional sanitized pending identities`() = runBlocking {
         harness.activeSessionListPayload = buildJsonObject {
             put("sessions", JsonArray(listOf(buildJsonObject {

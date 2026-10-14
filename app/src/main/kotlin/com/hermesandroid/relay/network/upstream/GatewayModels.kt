@@ -429,6 +429,8 @@ data class GatewayActiveSession(
     val profile: String? = null,
     /** Read-only request identities; never authorize answering another client's request. */
     val pendingInputs: List<GatewayPendingInput> = emptyList(),
+    /** Optional conversation-scoped active child count, absent on older Gateways. */
+    val activeSubagentCount: Int = 0,
 )
 
 data class GatewayPendingInput(val id: String, val method: String)

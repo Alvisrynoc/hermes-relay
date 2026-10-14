@@ -573,6 +573,7 @@ class ChatViewModel : ViewModel() {
         sessionActivityPollJob = null
         lastLocalActivityOwner = null
         lastLocalStreaming = false
+        _observedSubagentCount.value = 0
         reduceSessionActivity(
             SessionActivityUpdate.BeginGeneration(
                 scope = scope,
@@ -2562,6 +2563,8 @@ class ChatViewModel : ViewModel() {
     )
     private val observedSnapshotInputs = mutableMapOf<String, SnapshotInputHint>()
     private val deliveredSnapshotInputs = mutableSetOf<String>()
+    private val _observedSubagentCount = MutableStateFlow(0)
+    val observedSubagentCount: StateFlow<Int> = _observedSubagentCount.asStateFlow()
 
     private fun clearSnapshotInputHints() {
         observedSnapshotInputs.values.forEach { hint ->
@@ -2724,6 +2727,10 @@ class ChatViewModel : ViewModel() {
                             }
                         }.toMap(),
                     )
+                    val currentRuntimeIds = resolved.runtimes.filter { it.owner == currentOwner }
+                        .mapTo(mutableSetOf()) { it.runtimeId }
+                    _observedSubagentCount.value = result.sessions.filter { it.runtimeSessionId in currentRuntimeIds }
+                        .maxOfOrNull { it.activeSubagentCount } ?: 0
                     val scopes = directory.mapTo(mutableSetOf()) {
                         SessionActivityScope.of(it.connectionId, it.profile)
                     }
@@ -2751,6 +2758,7 @@ class ChatViewModel : ViewModel() {
                 GatewayActiveSessionsResult.Unsupported,
                 is GatewayActiveSessionsResult.TransientFailure -> {
                     if (gatewayClient !== client || generation != sessionActivityGeneration.get()) return
+                    _observedSubagentCount.value = 0
                     val currentStoredId = currentOwner?.storedSessionId
                     if (chatVisible && passiveObservationCatchupPendingSessionId == currentStoredId) {
                         val scheduled = currentStoredId?.let { storedId ->
@@ -3794,6 +3802,7 @@ class ChatViewModel : ViewModel() {
             passiveGatewayHistoryRefreshJob = null
             passivelyObservedGatewaySessionId = null
             passiveObservationCatchupPendingSessionId = null
+            _observedSubagentCount.value = 0
             requestSessionActivityRefresh()
         }
         return changed
