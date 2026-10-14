@@ -4525,6 +4525,30 @@ class ChatViewModelGatewayInboundTurnTest {
     }
 
     @Test
+    fun passiveHistoryRefreshShowsLoadingAndKeepsTranscriptOnFailure() {
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        viewModel.setChatTurnCheckpointStore(MemoryCheckpointStore())
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        handler.loadMessageHistory(persistedAnswerHistory())
+        val previous = handler.messages.value
+        viewModel.setProfileMessageLoader {
+            started.complete(Unit)
+            release.await()
+            Result.failure(IllegalStateException("History connection lost"))
+        }
+        viewModel.setChatVisible(true)
+        awaitCondition { started.isCompleted }
+        assertTrue(viewModel.isRefreshingHistory.value)
+        assertEquals(previous, handler.messages.value)
+        release.complete(Unit)
+        awaitCondition { !viewModel.isRefreshingHistory.value && viewModel.chatFailure.value != null }
+        assertEquals(previous, handler.messages.value)
+        assertEquals("History connection lost", viewModel.chatFailure.value?.rawError)
+    }
+
+    @Test
     fun passiveForegroundObservationNeverClaimsOrInterruptsDesktopTurn() {
         val directoryReads = AtomicInteger(0)
         val observerProfile = Profile(

@@ -1016,6 +1016,10 @@ fun ChatScreen(
     val retainedActivityPreview by chatViewModel.retainedActivityPreview.collectAsState()
     val subagentChildPreview by chatViewModel.subagentChildPreview.collectAsState()
     val isLoadingHistory by chatViewModel.isLoadingHistory.collectAsState()
+    val isRefreshingHistory by chatViewModel.isRefreshingHistory.collectAsState()
+    val hasOlderHistory by chatViewModel.hasOlderHistory.collectAsState()
+    val isLoadingOlderHistory by chatViewModel.isLoadingOlderHistory.collectAsState()
+    val historyHeaderItems = if ((hasOlderHistory || isLoadingOlderHistory) && chatViewModel.streamingEndpoint == "gateway") 2 else 1
     val isLoadingSessions by chatViewModel.isLoadingSessions.collectAsState()
     val isLoadingMoreSessions by chatViewModel.isLoadingMoreSessions.collectAsState()
     val hasMoreSessions by chatViewModel.hasMoreSessions.collectAsState()
@@ -3350,12 +3354,8 @@ fun ChatScreen(
             // are reached from Settings (Settings → Hermes management / Bridge);
             // Terminal + Settings remain quick icons in the top app bar above.
 
-            // Loading history indicator — only when there's nothing already on
-            // screen. During a profile/session switch the previous transcript is
-            // held visible while the new history loads (see
-            // ChatViewModel.switchProfileContext), so a spinner over real
-            // content would read as noise; the list cross-fades instead.
-            if (isLoadingHistory && !isChatConnecting && messages.isEmpty()) {
+            // Keep retained messages visible while showing that the server read is in progress.
+            if ((isLoadingHistory || isRefreshingHistory) && !isChatConnecting) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -3718,6 +3718,17 @@ fun ChatScreen(
                         verticalArrangement = Arrangement.spacedBy(2.dp)
                     ) {
                         item { Spacer(modifier = Modifier.height(8.dp).animateItem()) }
+                        if ((hasOlderHistory || isLoadingOlderHistory) && chatViewModel.streamingEndpoint == "gateway") {
+                            item(key = "older-history") {
+                                TextButton(
+                                    onClick = { chatViewModel.loadOlderHistory() },
+                                    enabled = !isLoadingOlderHistory && !isLoadingHistory && !isRefreshingHistory && !isStreaming,
+                                    modifier = Modifier.fillMaxWidth(),
+                                ) {
+                                    Text(stringResource(if (isLoadingOlderHistory) R.string.chat_loading_messages else R.string.chat_load_older_messages))
+                                }
+                            }
+                        }
 
                         // `id` can legitimately change once after a Gateway turn:
                         // the history reconcile adopts the persisted server id.
@@ -3923,7 +3934,7 @@ fun ChatScreen(
                                                 current = userScrolledAway,
                                                 event = ChatFollowEvent.UserMovedAway,
                                             )
-                                            scope.launch { listState.animateScrollToItem(targetIndex + 1) }
+                                            scope.launch { listState.animateScrollToItem(targetIndex + historyHeaderItems) }
                                         }
                                     },
                                     onSpeakMessage = if (
@@ -4061,7 +4072,7 @@ fun ChatScreen(
                                         current = userScrolledAway,
                                         event = ChatFollowEvent.UserMovedAway,
                                     )
-                                    scope.launch { listState.animateScrollToItem(messageIndex + 1) }
+                                    scope.launch { listState.animateScrollToItem(messageIndex + historyHeaderItems) }
                                 }
                             },
                             onClose = { showTranscriptSearch = false },
@@ -4287,7 +4298,7 @@ fun ChatScreen(
                                     current = userScrolledAway,
                                     event = ChatFollowEvent.UserMovedAway,
                                 )
-                                scope.launch { listState.animateScrollToItem(index + 1) }
+                                scope.launch { listState.animateScrollToItem(index + historyHeaderItems) }
                             }
                         },
                         onRemove = { quotedMessage = null },

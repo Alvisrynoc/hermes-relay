@@ -4690,4 +4690,5 @@
     <string name="paired_devices_policy_failed">Could not shorten the session. Refresh Relay sessions and try a shorter duration, or pair again with a fresh operator-approved code to renew access.</string>
     <string name="paired_devices_updating">Updating session…</string>
     <string name="paired_devices_no_shorter_duration">No shorter preset remains. You can revoke this session, or pair again to renew access.</string>
+    <string name="chat_load_older_messages">Load older messages</string>
 </resources>

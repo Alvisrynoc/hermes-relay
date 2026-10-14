@@ -131,6 +131,7 @@ import com.hermesandroid.relay.network.upstream.models.MessageItem
 import com.hermesandroid.relay.network.upstream.models.parseMessageReactions
 import com.hermesandroid.relay.network.upstream.SESSION_MESSAGE_PAGE_SIZE
 import com.hermesandroid.relay.network.upstream.SessionMessageLoadMode
+import com.hermesandroid.relay.network.upstream.mergeRecentSessionHistory
 import com.hermesandroid.relay.network.upstream.models.SessionItem
 import com.hermesandroid.relay.network.upstream.models.SkillInfo
 import com.hermesandroid.relay.network.upstream.models.UsageInfo
@@ -2797,6 +2798,7 @@ class ChatViewModel : ViewModel() {
             sessionActivityPollJob = null
             passiveGatewayHistoryRefreshJob?.cancel()
             passiveGatewayHistoryRefreshJob = null
+            _isRefreshingHistory.value = false
             passivelyObservedGatewaySessionId = null
             passiveObservationCatchupPendingSessionId = null
             sessionActivityGeneration.incrementAndGet()
@@ -3533,15 +3535,25 @@ class ChatViewModel : ViewModel() {
         val contextKey = activeProfileContextKey
         val profileName = currentSessionProfileName()
         val refreshJob = viewModelScope.launch(start = CoroutineStart.LAZY) {
+            _isRefreshingHistory.value = true
             try {
                 repeat(if (retryUntilChanged) 8 else 1) { attempt ->
-                    val serverMessages = runCatching {
+                    val serverMessages = try {
                         loadGatewaySessionHistory(
                             sessionId = storedSessionId,
                             requireProfileScope = true,
                             profileName = profileName,
                         )
-                    }.getOrNull() ?: return@launch
+                    } catch (error: kotlinx.coroutines.CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        if (chatHandler === handler && activeProfileContextKey == contextKey &&
+                            currentSessionProfileName() == profileName &&
+                            handler.currentSessionId.value == storedSessionId) {
+                            publishHistoryLoadFailure(storedSessionId, error)
+                        }
+                        return@launch
+                    }
                     if (
                         chatHandler !== handler ||
                         activeProfileContextKey != contextKey ||
@@ -3568,6 +3580,7 @@ class ChatViewModel : ViewModel() {
                             message.resolvedReasoning.orEmpty(),
                         )
                     }
+                    clearMatchingHistoryLoadFailure(storedSessionId)
                     if (visibleSignature != serverSignature) {
                         handler.loadMessageHistory(serverMessages)
                         return@launch
@@ -3576,6 +3589,7 @@ class ChatViewModel : ViewModel() {
                 }
             } finally {
                 if (passiveGatewayHistoryRefreshJob === coroutineContext[Job]) {
+                    _isRefreshingHistory.value = false
                     passiveGatewayHistoryRefreshJob = null
                 }
             }
@@ -4248,12 +4262,29 @@ class ChatViewModel : ViewModel() {
         mode: SessionMessageLoadMode = SessionMessageLoadMode.LATEST,
         profileName: String? = currentSessionProfileName(),
     ): List<MessageItem> {
+        val historyContextKey = activeProfileContextKey
+        val historyTranscript = chatHandler?.messages?.value
         val scoped = profileMessageLoader?.invoke(profileName, sessionId, mode)
         if (scoped != null) {
             // A gateway profile owns a distinct state.db. Never fall through to
             // the launch/default API database when its scoped read fails: an
             // empty/default transcript is not authoritative for this session.
-            return if (requireProfileScope) scoped.getOrThrow() else scoped.getOrElse { emptyList() }
+            val messages = if (requireProfileScope) scoped.getOrThrow() else scoped.getOrElse { emptyList() }
+            if (mode == SessionMessageLoadMode.LATEST && activeProfileContextKey == historyContextKey &&
+                chatHandler?.messages?.value === historyTranscript && chatHandler?.currentSessionId?.value == sessionId && currentSessionProfileName() == profileName) {
+                val owner = Triple(activeProfileContextKey, profileName, sessionId)
+                val previous = retainedGatewayHistory.takeIf { retainedHistoryOwner == owner }.orEmpty()
+                val merged = mergeRecentSessionHistory(previous, messages)
+                if (retainedHistoryOwner != owner || (previous.isNotEmpty() && merged === messages)) {
+                    olderHistoryExhausted = false
+                }
+                retainedHistoryOwner = owner
+                retainedGatewayHistory = merged
+                _hasOlderHistory.value = !olderHistoryExhausted && merged.size < 5_000 && messages.size >= 50 &&
+                    messages.all { !it.id.isNullOrBlank() }
+                return merged
+            }
+            return messages
         }
         if (requireProfileScope) {
             throw IllegalStateException(
@@ -4487,6 +4518,55 @@ class ChatViewModel : ViewModel() {
             // identity, not the literal word.
             return if (AgentDisplay.isClearedPersonality(selected)) _defaultPersonality.value else selected
         }
+
+    private var retainedHistoryOwner: Triple<String?, String?, String>? = null
+    private var retainedGatewayHistory: List<MessageItem> = emptyList()
+    private var olderHistoryExhausted = false
+    private val _hasOlderHistory = MutableStateFlow(false)
+    val hasOlderHistory: StateFlow<Boolean> = _hasOlderHistory.asStateFlow()
+    private val _isLoadingOlderHistory = MutableStateFlow(false)
+    val isLoadingOlderHistory: StateFlow<Boolean> = _isLoadingOlderHistory.asStateFlow()
+
+    fun loadOlderHistory() {
+        val handler = chatHandler ?: return
+        val session = handler.currentSessionId.value ?: return
+        val contextKey = activeProfileContextKey
+        val profile = currentSessionProfileName()
+        val owner = Triple(contextKey, profile, session)
+        if (streamingEndpoint != "gateway" || retainedHistoryOwner != owner ||
+            !_hasOlderHistory.value || _isLoadingOlderHistory.value || _isLoadingHistory.value ||
+            _isRefreshingHistory.value || handler.isStreaming.value || activeStream != null) return
+        val previous = retainedGatewayHistory
+        val visible = handler.messages.value
+        _isLoadingOlderHistory.value = true
+        viewModelScope.launch {
+            try {
+                val page = profileMessageLoader?.invoke(profile, session, SessionMessageLoadMode.Older(previous.size))
+                    ?.getOrThrow() ?: return@launch
+                if (chatHandler !== handler || activeProfileContextKey != contextKey ||
+                    currentSessionProfileName() != profile || handler.currentSessionId.value != session ||
+                    retainedGatewayHistory !== previous || handler.messages.value !== visible ||
+                    handler.isStreaming.value || activeStream != null) return@launch
+                val existingIds = previous.mapNotNull { it.id }.toSet()
+                val older = page.filter { it.id != null && it.id !in existingIds }
+                olderHistoryExhausted = page.size < 50 || older.isEmpty()
+                _hasOlderHistory.value = !olderHistoryExhausted && previous.size + older.size < 5_000
+                retainedGatewayHistory = older + previous
+                handler.loadMessageHistory(retainedGatewayHistory)
+                clearMatchingHistoryLoadFailure(session)
+            } catch (error: kotlinx.coroutines.CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (chatHandler === handler && activeProfileContextKey == contextKey &&
+                    handler.currentSessionId.value == session) publishHistoryLoadFailure(session, error)
+            } finally {
+                _isLoadingOlderHistory.value = false
+            }
+        }
+    }
+
+    private val _isRefreshingHistory = MutableStateFlow(false)
+    val isRefreshingHistory: StateFlow<Boolean> = _isRefreshingHistory.asStateFlow()
 
     private val _isLoadingHistory = MutableStateFlow(false)
     val isLoadingHistory: StateFlow<Boolean> = _isLoadingHistory.asStateFlow()
@@ -4976,6 +5056,7 @@ class ChatViewModel : ViewModel() {
                 }
                 clearTurnCheckpoint()
                 historyLoadGeneration.incrementAndGet()
+                _hasOlderHistory.value = false
                 sessionRefreshGeneration.incrementAndGet()
                 gatewayVisibleReconnectRetryJob?.cancel()
                 gatewayVisibleReconnectRetryJob = null
@@ -5271,6 +5352,7 @@ class ChatViewModel : ViewModel() {
         if (!isInitialContextBinding) releaseTurnForNavigation(handler)
         cancelAnswerRecovery(settleUi = false)
         val loadGeneration = historyLoadGeneration.incrementAndGet()
+        _hasOlderHistory.value = false
         val sessionProfileName = targetProfileName
         val directoryGenerationFloor = sessionRefreshGeneration.incrementAndGet()
         deferredGatewayPrewarm = if (
@@ -5985,6 +6067,7 @@ class ChatViewModel : ViewModel() {
         releaseTurnForNavigation(handler)
         cancelAnswerRecovery(settleUi = false)
         val loadGeneration = historyLoadGeneration.incrementAndGet()
+        _hasOlderHistory.value = false
         deferredGatewayPrewarm = null
         automaticGatewayPrewarmBlocked = false
         selectBackgroundProcessSession(null)
@@ -6086,6 +6169,7 @@ class ChatViewModel : ViewModel() {
         releaseTurnForNavigation(handler)
         cancelAnswerRecovery(settleUi = false)
         historyLoadGeneration.incrementAndGet()
+        _hasOlderHistory.value = false
         val slug = name.trim().lowercase().replace(Regex("[^a-z0-9]+"), "-").trim('-').take(24)
         val chatId = "t-" + slug.ifBlank { "thread" } + "-" +
             java.util.UUID.randomUUID().toString().take(6)
@@ -6124,6 +6208,7 @@ class ChatViewModel : ViewModel() {
         releaseTurnForNavigation(handler)
         cancelAnswerRecovery(settleUi = false)
         historyLoadGeneration.incrementAndGet()
+        _hasOlderHistory.value = false
         pendingThread = PendingThread(
             chatId = normalizedChatId,
             name = ordered.last().title.ifBlank { "Hermes" },
@@ -6230,6 +6315,7 @@ class ChatViewModel : ViewModel() {
         releaseTurnForNavigation(handler)
         cancelAnswerRecovery(settleUi = false)
         val loadGeneration = historyLoadGeneration.incrementAndGet()
+        _hasOlderHistory.value = false
         // Selecting a concrete row is explicit user intent and supersedes an
         // automatic profile-restore barrier for the prior remembered session.
         deferredGatewayPrewarm = null
