@@ -1,0 +1,32 @@
+{
+  "baseline": "d85972603283884a5c02c0e5cd8244565e29ad04",
+  "production_scope": "One loading-row condition and its explanatory comment; no VM/history/polling/status edit.",
+  "integration": {
+    "tests": 1,
+    "passed": 1,
+    "seconds": 4.15,
+    "build": "passed; 1m03s",
+    "selector": "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest.passiveHistoryRefreshShowsLoadingAndKeepsTranscriptOnFailure",
+    "evidence": "integration-final.xml"
+  },
+  "source_sha256": {
+    "app/src/main/kotlin/com/hermesandroid/relay/ui/screens/ChatScreen.kt": "2e9683bf394f9408aebc9b6be533e94d7078c0f25e3b960d6ac1d9959057aca0",
+    "app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/ObservedChatStatusInstrumentedTest.kt": "3b0c0d5dc107a0fa59794122a6743122613d167513e03189836d40b1c25c99bd"
+  },
+  "runtime": {
+    "status": "passed",
+    "level": "system",
+    "selector": "com.hermesandroid.relay.viewmodel.ObservedChatStatusInstrumentedTest#passivePollingKeepsTranscriptStableAndExplicitReloadShowsLoading",
+    "tests": 1,
+    "seconds": 12.681,
+    "platform": "Pixel 6 AOSP x86_64 API 36",
+    "apk_build": "passed; 1m18s; 71 tasks (7 executed, 64 up-to-date)",
+    "apk_sha256": {
+      "sideload/debug/hermes-relay-1.18.1-sideload-debug.apk": "1e8899b7ebc715f64b7a5fed3b5ee114cfc6f0c57863381ea66cd3a01d8563b0",
+      "androidTest/sideload/debug/hermes-relay-1.18.1-sideload-debug-androidTest.apk": "8e3ebb8c590cfa065c80a9117516339eec57646c33bbf8b80fc41a717805bb69"
+    },
+    "test_only_patch_sha256": "02352cd2f644b9d42dee42e008d2e05ab1fa5042474612a1faeb614271396b51",
+    "evidence": "runtime-final.txt"
+  },
+  "baseline_runtime": "Not run; cause identified directly in existing conditional row. No failing-baseline claim."
+}

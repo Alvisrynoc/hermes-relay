@@ -3388,8 +3388,8 @@ fun ChatScreen(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
-            // Keep retained messages visible while showing that the server read is in progress.
-            if ((isLoadingHistory || isRefreshingHistory) && !isChatConnecting) {
+            // Explicit loads show progress; passive polling must not shift the retained transcript.
+            if (isLoadingHistory && !isChatConnecting) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()

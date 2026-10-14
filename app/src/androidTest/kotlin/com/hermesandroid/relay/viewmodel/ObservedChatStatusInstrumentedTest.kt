@@ -25,6 +25,7 @@ import com.hermesandroid.relay.ui.components.LocalMessageActionHost
 import com.hermesandroid.relay.ui.components.avatar.LocalBackgroundVisualizationEnabled
 import com.hermesandroid.relay.ui.screens.ChatScreen
 import com.hermesandroid.relay.ui.theme.HermesRelayTheme
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -127,6 +128,48 @@ class ObservedChatStatusInstrumentedTest {
         for (method in listOf("session.resume", "session.activate", "session.create", "prompt.submit", "session.interrupt")) {
             assertEquals("passive status must not control the Desktop turn: $method", 0, fixture.rpcCount(method))
         }
+    }
+
+    @Test fun passivePollingKeepsTranscriptStableAndExplicitReloadShowsLoading() {
+        fixture.activeSubagentCount = 2
+        compose.runOnUiThread { assertTrue(vm.openProfileSession(PROFILE, profile,
+            AgentDisplay.profileContextKey("fixture-connection", PROFILE), STORED)) }
+        waitFor { !vm.isLoadingHistory.value && !vm.isRefreshingHistory.value &&
+            handler.messages.value.any { it.content == "Initial synthetic history" } &&
+            vm.observedSubagentCount.value == 2 }
+        compose.onNodeWithText("Initial synthetic history").assertIsDisplayed()
+
+        val explicitRead = CompletableDeferred<Result<List<MessageItem>>>()
+        compose.runOnUiThread {
+            vm.setProfileMessageLoader { explicitRead.await() }
+            vm.switchSession(STORED)
+        }
+        waitFor { vm.isLoadingHistory.value }
+        compose.onNodeWithText("Loading messages…").assertIsDisplayed()
+        explicitRead.complete(Result.success(history))
+        waitFor { !vm.isLoadingHistory.value && !vm.isRefreshingHistory.value }
+        compose.onNodeWithText("Loading messages…").assertDoesNotExist()
+
+        repeat(2) {
+            val before = compose.onNodeWithText("Initial synthetic history").fetchSemanticsNode().boundsInRoot
+            val passiveRead = CompletableDeferred<Result<List<MessageItem>>>()
+            compose.runOnUiThread {
+                vm.setProfileMessageLoader { passiveRead.await() }
+                vm.requestSessionActivityRefresh()
+            }
+            waitFor { vm.isRefreshingHistory.value }
+            assertTrue(!vm.isLoadingHistory.value)
+            compose.onNodeWithText("Loading messages…").assertDoesNotExist()
+            assertEquals("passive refresh moved retained transcript", before,
+                compose.onNodeWithText("Initial synthetic history").fetchSemanticsNode().boundsInRoot)
+            passiveRead.complete(Result.success(history))
+            waitFor { !vm.isRefreshingHistory.value }
+            compose.onNodeWithText("Loading messages…").assertDoesNotExist()
+            assertEquals(before, compose.onNodeWithText("Initial synthetic history").fetchSemanticsNode().boundsInRoot)
+        }
+        assertTrue(!handler.isStreaming.value)
+        assertEquals(0, fixture.rpcCount("prompt.submit"))
+        assertEquals(0, fixture.rpcCount("session.interrupt"))
     }
 
     private fun waitFor(condition: () -> Boolean) {
