@@ -1,0 +1,128 @@
+{
+  "baseline": "233d92d04ce909bd01b9b23faca143b55e15e83c",
+  "production_code_matches_pre_doc_commit": "b99af532f2db8c39c81bd5665507d9a5c20992c9",
+  "jvm": {
+    "regression-red.xml": {
+      "tests": "9",
+      "failures": "6",
+      "errors": "0",
+      "time": "14.418",
+      "timestamp": "2026-10-14T16:38:01.938Z",
+      "selectors": [
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.existingGoalResumeFailureDoesNotCreateOrDispatch",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.coldObservedGoalResumesExactStoredConversation",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.goalKickoffSubmitsTransportPromptWithLiteralDisplay",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.goalReplyAfterOwnerSwitchCannotSubmitForeignKickoff",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.goalImmediatelyAfterSuccessfulSendKeepsExistingBinding",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.ownerSwitchDuringGoalAttachmentDoesNotDispatch",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.genuineDraftGoalCreatesOnlyItsNormalSelectedSession",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.quickCommandRemainsSessionlessWithoutCreatingConversation",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.idleReconnectAfterSuccessfulSendResumesTheSameGoalConversation"
+      ]
+    },
+    "navigation-fence-incomplete.xml": {
+      "tests": "10",
+      "failures": "1",
+      "errors": "0",
+      "time": "4.968",
+      "timestamp": "2026-10-14T16:44:52.710Z",
+      "selectors": [
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.existingGoalResumeFailureDoesNotCreateOrDispatch",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.coldObservedGoalResumesExactStoredConversation",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.goalKickoffSubmitsTransportPromptWithLiteralDisplay",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.goalReplyAfterOwnerSwitchCannotSubmitForeignKickoff",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.goalImmediatelyAfterSuccessfulSendKeepsExistingBinding",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.ownerSwitchDuringGoalAttachmentDoesNotDispatch",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.returningToSameOwnerDoesNotReviveAnOldGoalDirective",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.genuineDraftGoalCreatesOnlyItsNormalSelectedSession",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.quickCommandRemainsSessionlessWithoutCreatingConversation",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.idleReconnectAfterSuccessfulSendResumesTheSameGoalConversation"
+      ]
+    },
+    "catalog-race-red.xml": {
+      "tests": "1",
+      "failures": "1",
+      "errors": "0",
+      "time": "4.258",
+      "timestamp": "2026-10-14T16:55:32.627Z",
+      "selectors": [
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.publicGoalCatalogReplyCannotMoveTheInvocationToAnotherOwner"
+      ]
+    },
+    "regression-final.xml": {
+      "tests": "12",
+      "failures": "0",
+      "errors": "0",
+      "time": "5.327",
+      "timestamp": "2026-10-14T16:58:59.746Z",
+      "selectors": [
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.existingGoalResumeFailureDoesNotCreateOrDispatch",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.coldObservedGoalResumesExactStoredConversation",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.goalKickoffSubmitsTransportPromptWithLiteralDisplay",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.goalReplyAfterOwnerSwitchCannotSubmitForeignKickoff",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.goalImmediatelyAfterSuccessfulSendKeepsExistingBinding",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.lateNonGoalDirectiveCannotSubmitIntoChangedOwner",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.ownerSwitchDuringGoalAttachmentDoesNotDispatch",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.publicGoalCatalogReplyCannotMoveTheInvocationToAnotherOwner",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.returningToSameOwnerDoesNotReviveAnOldGoalDirective",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.genuineDraftGoalCreatesOnlyItsNormalSelectedSession",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.quickCommandRemainsSessionlessWithoutCreatingConversation",
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest.idleReconnectAfterSuccessfulSendResumesTheSameGoalConversation"
+      ]
+    }
+  },
+  "diagnostic_baseline": {
+    "count": 3,
+    "passed": 3,
+    "seconds": 22.566,
+    "evidence": "observed Gradle XML summary and retained private build log; XML subsequently replaced by next selection",
+    "unchanged_socket_countercheck": "completed phone turn retains a valid live goal session",
+    "reproduced_failure": "cold observation or idle reconnect omits goal dispatch session_id",
+    "directive_defect": "native send result ignored as no output without a submitted prompt"
+  },
+  "backend": {
+    "existing_goal_tests": {
+      "passed": 3,
+      "seconds": 15.5,
+      "selectors": [
+        "test_slash_exec_routes_goal_to_command_dispatch",
+        "test_goal_resume_after_budget_exhaustion_dispatches_continuation",
+        "test_goal_resume_without_goal_stays_exec"
+      ],
+      "evidence": "canonical runner console result"
+    },
+    "isolated_missing_session_probe": {
+      "passed": 1,
+      "seconds": 11.7,
+      "selector": "test_goal_missing_session_reports_exact_failure",
+      "evidence": "retained private canonical-runner log",
+      "verified_current_methods_tools_sha256": "0E98DAA609159AC0D7ABC45C7D450429F29CBAF7AA5C96D712B1AEB141D7F130"
+    }
+  },
+  "source_sha256": {
+    "app/src/main/kotlin/com/hermesandroid/relay/viewmodel/ChatViewModel.kt": "aa64b2afa188af342fafb246405b8f9469f9fb451007c6ba0a471a2185973997",
+    "app/src/test/kotlin/com/hermesandroid/relay/viewmodel/ChatViewModelGoalCommandTest.kt": "f34b9abfe3875ea3e2c0257354c62a5f0e36179f07eb9ec78be79705c20bf8a2",
+    "app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/GoalCommandInstrumentedTest.kt": "c118018cea74ed3428b55c940498a092a7b6400e6406caaf4d07145818b37c1b",
+    "app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/GatewayForegroundRecoveryInstrumentedTest.kt": "82d12aeb7921834cc04ab66f3cf7bef430e69c39b9ecc1409bfc376e30afb20f"
+  },
+  "runtime": {
+    "status": "passed",
+    "tests": 1,
+    "seconds": 10.249,
+    "level": "system",
+    "selector": "com.hermesandroid.relay.viewmodel.GoalCommandInstrumentedTest#goalResumeAttachesSelectedChatAndRendersItsContinuation",
+    "platform": "Pixel 6 AOSP x86_64 API 36",
+    "apk_build": "passed; 2m23s; 71 tasks",
+    "apk_sha256": {
+      "sideload/debug/hermes-relay-1.18.1-sideload-debug.apk": "2d9e94c0176158d7a5f163b3b474501fca2fb8f89b905fd052ef34ee24f4f912",
+      "androidTest/sideload/debug/hermes-relay-1.18.1-sideload-debug-androidTest.apk": "c2e65280510fc4053d60d733f4c61e2d9987f9a2ec2750597100c82fb26f0906"
+    },
+    "test_only_patch_sha256": "6496aa89c9b14cb1fd78a7cd342070ae446d69e10eeb9e4200177fff700665df",
+    "evidence": "runtime-final.txt",
+    "limits": [
+      "Synthetic server; no real provider or phone",
+      "ConnectionViewModel header not fixture-backed; actual client socket checked",
+      "List scrolling used; Send-button auto-follow outside this scenario"
+    ]
+  }
+}

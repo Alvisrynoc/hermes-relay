@@ -727,6 +727,9 @@ internal class AndroidGatewayContractFixture {
     @Volatile
     var profileName: String = "default"
 
+    @Volatile
+    var slashCommandResult: JsonObject? = null
+
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             sockets.add(webSocket)
@@ -743,6 +746,10 @@ internal class AndroidGatewayContractFixture {
             rpcLog.add(method to params)
 
             val result = when (method) {
+                "commands.catalog" -> if (slashCommandResult == null) JsonObject(emptyMap()) else buildJsonObject {
+                    put("pairs", json.parseToJsonElement("""[["/goal","Manage goal"]]"""))
+                }
+                "slash.exec" -> slashCommandResult ?: JsonObject(emptyMap())
                 "session.resume" -> sessionSnapshot("fixture-live-1")
                 "session.activate" -> sessionSnapshot(
                     (params["session_id"] as? JsonPrimitive)?.contentOrNull ?: "fixture-live-1",

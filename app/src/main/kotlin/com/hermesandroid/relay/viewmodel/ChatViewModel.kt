@@ -7611,8 +7611,21 @@ class ChatViewModel : ViewModel() {
             return true
         }
 
+        val invocationContext = activeProfileContextKey
+        val invocationSession = handler.currentSessionId.value
+        val invocationProfile = AgentDisplay.profileSessionKey(currentSessionProfileName())
+        val invocationNavigation = threadNavigationGeneration.get()
+        val invocationRevision = conversationBinding.value.revision
+        fun ownsInvocation(): Boolean = gatewayClient === gateway && chatHandler === handler &&
+            streamingEndpoint == "gateway" && activeProfileContextKey == invocationContext &&
+            handler.currentSessionId.value == invocationSession &&
+            AgentDisplay.profileSessionKey(currentSessionProfileName()) == invocationProfile &&
+            threadNavigationGeneration.get() == invocationNavigation &&
+            conversationBinding.value.revision == invocationRevision
         viewModelScope.launch {
-            val commands = currentOrRefreshedServerCommands(gateway, handler) ?: return@launch
+            if (!ownsInvocation()) return@launch
+            val commands = currentOrRefreshedServerCommands(gateway, handler, ::ownsInvocation) ?: return@launch
+            if (!ownsInvocation()) return@launch
             val known = commands.any {
                 normalizeSlashCommandName(it.command.removePrefix("/").substringBefore(' ')) == normalizedName
             }
@@ -7628,14 +7641,15 @@ class ChatViewModel : ViewModel() {
     private suspend fun currentOrRefreshedServerCommands(
         gateway: GatewayChatClient,
         handler: ChatHandler,
+        ownsInvocation: () -> Boolean,
     ): List<SlashCommand>? {
         val current = _serverCommands.value
         if (current.isNotEmpty()) return current
         val catalog = gateway.commandsCatalog(connectIfNeeded = true).getOrElse { e ->
-            handler.addSystemNotice("Slash commands are unavailable: ${e.message ?: "command catalog could not be loaded"}")
+            if (ownsInvocation()) handler.addSystemNotice("Slash commands are unavailable: ${e.message ?: "command catalog could not be loaded"}")
             return null
         }
-        if (gatewayClient !== gateway) return null
+        if (gatewayClient !== gateway || !ownsInvocation()) return null
         val parsed = parseCommandsCatalog(catalog)
         _serverCommands.value = parsed
         return parsed
@@ -7721,19 +7735,55 @@ class ChatViewModel : ViewModel() {
             return
         }
         val name = commandLine.removePrefix("/").substringBefore(' ')
+        val goalCommand = name.equals("goal", ignoreCase = true)
+        val contextKey = activeProfileContextKey
+        val profileKey = AgentDisplay.profileSessionKey(currentSessionProfileName())
+        var sessionId = handler.currentSessionId.value
+        val navigationGeneration = threadNavigationGeneration.get()
+        var bindingRevision = conversationBinding.value.revision
+        fun ownsCommand(): Boolean = (
+            gatewayClient === gateway && chatHandler === handler && streamingEndpoint == "gateway" &&
+                activeProfileContextKey == contextKey && handler.currentSessionId.value == sessionId &&
+                AgentDisplay.profileSessionKey(currentSessionProfileName()) == profileKey &&
+                threadNavigationGeneration.get() == navigationGeneration &&
+                conversationBinding.value.revision == bindingRevision
+            )
 
+        if (goalCommand) {
+            if (!ownsCommand()) return
+            // Explicit /goal needs a live session; ordinary opens remain passive.
+            // Existing owners resume exactly, while only a genuine draft may create.
+            val prepared = gateway.prepareModelSelectionSession(sessionId).getOrElse { error ->
+                if (ownsCommand()) handler.addSystemNotice("/goal failed: ${error.message ?: "gateway unavailable"}")
+                return
+            }
+            if (!ownsCommand()) return
+            if (sessionId == null) {
+                sessionId = prepared
+                handler.setSessionId(prepared)
+                conversationBindingController.switchSession(prepared)
+                bindingRevision = conversationBinding.value.revision
+                selectBackgroundProcessSession(prepared)
+                gatewayProcessController.sessionReady(prepared)
+                onSessionChanged?.invoke(prepared)
+            }
+        }
+        if (!ownsCommand()) return
         val exec = gateway.slashExec(commandLine)
+        if (!ownsCommand()) return
         exec.onSuccess { result ->
-            val output = result.stringValue("output") ?: "(no output)"
-            val warning = result.stringValue("warning")
-            handler.addSystemNotice(listOfNotNull(output, warning).joinToString("\n\n"))
+            if (result.stringValue("type") != null) {
+                applyServerSlashResult(gateway, handler, result, commandLine, depth)
+            } else {
+                val output = result.stringValue("output") ?: "(no output)"
+                val warning = result.stringValue("warning")
+                handler.addSystemNotice(listOfNotNull(output, warning).joinToString("\n\n"))
+            }
             return
         }
         val failure = exec.exceptionOrNull()
         val code = (failure as? GatewayRpcException)?.code
-        // 4018 = "use command.dispatch"; "no live session" happens before
-        // the first gateway turn — command.dispatch works sessionless for
-        // quick/plugin commands, so fall through for that too.
+        // Sessionless quick/plugin commands still use the existing fallback.
         val fallThrough = code == 4018 ||
             failure?.message?.contains("no live session", ignoreCase = true) == true
         if (!fallThrough) {
@@ -7744,45 +7794,55 @@ class ChatViewModel : ViewModel() {
         val arg = commandLine.substringAfter(' ', "").trim().takeIf { it.isNotBlank() }
         gateway.commandDispatch(name, arg).fold(
             onSuccess = { result ->
-                when (result.stringValue("type")) {
-                    "exec", "plugin" ->
-                        handler.addSystemNotice(result.stringValue("output") ?: "(no output)")
-                    "skill" ->
-                        handler.addSystemNotice(safeGatewayCommandDisplay(result, commandLine))
-                    "alias" -> {
-                        val target = result.stringValue("target")
-                        if (target != null) {
-                            val line = if (target.startsWith("/")) target else "/$target"
-                            runServerSlashCommand(gateway, handler, line, depth + 1)
-                        }
-                    }
-                    "send" -> {
-                        result.stringValue("notice")?.let { handler.addSystemNotice(it) }
-                        result.stringValue("message")?.let { expandedMessage ->
-                            // The corrected gateway supplies a bounded literal
-                            // display alongside the expanded skill/send body.
-                            // Execute the expansion but keep it out of local UI,
-                            // checkpoints, titles, diagnostics, and retry text.
-                            sendMessageInternal(
-                                client = apiClient,
-                                handler = handler,
-                                text = safeGatewayCommandDisplay(result, commandLine),
-                                transportText = expandedMessage,
-                            )
-                        }
-                    }
-                    "prefill" -> {
-                        result.stringValue("notice")?.let { handler.addSystemNotice(it) }
-                        result.stringValue("message")?.let { _composerPrefill.trySend(it) }
-                    }
-                    else ->
-                        handler.addSystemNotice(result.stringValue("output") ?: "Command completed.")
-                }
+                if (ownsCommand()) applyServerSlashResult(gateway, handler, result, commandLine, depth)
             },
-            onFailure = { e ->
-                handler.addSystemNotice("/$name failed: ${e.message ?: "unknown error"}")
+            onFailure = { error ->
+                if (ownsCommand()) handler.addSystemNotice("/$name failed: ${error.message ?: "unknown error"}")
             },
         )
+    }
+
+    private suspend fun applyServerSlashResult(
+        gateway: GatewayChatClient,
+        handler: ChatHandler,
+        result: JsonObject,
+        commandLine: String,
+        depth: Int,
+    ) {
+        when (result.stringValue("type")) {
+            "exec", "plugin" ->
+                handler.addSystemNotice(result.stringValue("output") ?: "(no output)")
+            "skill" ->
+                handler.addSystemNotice(safeGatewayCommandDisplay(result, commandLine))
+            "alias" -> {
+                val target = result.stringValue("target")
+                if (target != null) {
+                    val line = if (target.startsWith("/")) target else "/$target"
+                    runServerSlashCommand(gateway, handler, line, depth + 1)
+                }
+            }
+            "send" -> {
+                result.stringValue("notice")?.let { handler.addSystemNotice(it) }
+                result.stringValue("message")?.let { expandedMessage ->
+                    // The corrected gateway supplies a bounded literal
+                    // display alongside the expanded skill/send body.
+                    // Execute the expansion but keep it out of local UI,
+                    // checkpoints, titles, diagnostics, and retry text.
+                    sendMessageInternal(
+                        client = apiClient,
+                        handler = handler,
+                        text = safeGatewayCommandDisplay(result, commandLine),
+                        transportText = expandedMessage,
+                    )
+                }
+            }
+            "prefill" -> {
+                result.stringValue("notice")?.let { handler.addSystemNotice(it) }
+                result.stringValue("message")?.let { _composerPrefill.trySend(it) }
+            }
+            else ->
+                handler.addSystemNotice(result.stringValue("output") ?: "Command completed.")
+        }
     }
 
     // === Turn-complete notification ===
