@@ -4703,6 +4703,57 @@ class ChatViewModelGatewayInboundTurnTest {
     }
 
     @Test
+    fun cachedBackgroundInputCannotReconfirmAfterWorkingButFreshEventsRemainTrusted() {
+        val context = AgentDisplay.profileContextKey("connection-a", null)
+        viewModel.switchProfileContext(context, STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        viewModel.setChatVisible(false)
+        val owner = com.hermesandroid.relay.data.SessionActivityOwner.of(
+            "connection-a", AgentDisplay.profileSessionKey(null), STORED_SESSION_ID)
+        @Suppress("UNCHECKED_CAST")
+        val records = ChatViewModel::class.java.getDeclaredField("sessionActivityRegistry")
+            .apply { isAccessible = true }.get(viewModel) as kotlinx.coroutines.flow.MutableStateFlow<com.hermesandroid.relay.data.SessionActivityRegistry>
+        val generation = (ChatViewModel::class.java.getDeclaredField("sessionActivityGeneration")
+            .apply { isAccessible = true }.get(viewModel) as java.util.concurrent.atomic.AtomicLong).get()
+        val key = ChatViewModel::class.java.declaredClasses.single { it.simpleName == "TurnCheckpointKey" }
+            .getDeclaredConstructor(String::class.java, String::class.java).apply { isAccessible = true }
+            .newInstance(context, STORED_SESSION_ID)
+        @Suppress("UNCHECKED_CAST")
+        val checkpoints = ChatViewModel::class.java.getDeclaredField("backgroundTurnCheckpoints")
+            .apply { isAccessible = true }.get(viewModel) as MutableMap<Any, ChatTurnCheckpoint>
+        val now = System.currentTimeMillis()
+        checkpoints[key] = ChatTurnCheckpoint(contextKey = context, sessionId = STORED_SESSION_ID,
+            liveSessionId = "live-resumed", transport = "gateway",
+            user = ChatTurnUserCheckpoint("synthetic-user", "synthetic", now),
+            assistant = ChatTurnAssistantCheckpoint("synthetic-assistant", timestamp = now),
+            priorUserMessageCount = 0, baselineAssistantCount = 0, startedAt = now, updatedAt = now)
+        @Suppress("UNCHECKED_CAST")
+        val listener = GatewayChatClient::class.java.getDeclaredField("backgroundInteractionListener")
+            .apply { isAccessible = true }.get(gatewayClient) as (com.hermesandroid.relay.network.upstream.GatewayBackgroundInteractionEvent) -> Unit
+        val ask = com.hermesandroid.relay.network.upstream.GatewayAsk(
+            com.hermesandroid.relay.network.upstream.GatewayAsk.Kind.APPROVAL, "synthetic-input", "synthetic", timeoutSeconds = 60)
+        listener(com.hermesandroid.relay.network.upstream.GatewayBackgroundInteractionEvent.Requested(STORED_SESSION_ID, null, ask))
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.NeedsInput, records.value.record(owner)?.phase())
+        records.value = records.value.reduce(com.hermesandroid.relay.data.SessionActivityUpdate.ActiveList(
+            scope = com.hermesandroid.relay.data.SessionActivityScope.of("connection-a", owner.profile),
+            runtimes = listOf(com.hermesandroid.relay.data.SessionLiveRuntime(owner, "live-resumed",
+                com.hermesandroid.relay.data.SessionLiveStatus.Working)), isCompleteForScope = true,
+            generation = generation, observedAtMillis = System.currentTimeMillis() + 100))
+        repeat(2) { ChatViewModel::class.java.getDeclaredMethod("publishBackgroundSessionActivity")
+            .apply { isAccessible = true }.invoke(viewModel) }
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.Working, records.value.record(owner)?.phase())
+        val fresh = ask.copy(requestId = "fresh-input")
+        listener(com.hermesandroid.relay.network.upstream.GatewayBackgroundInteractionEvent.Requested(STORED_SESSION_ID, null, fresh))
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.NeedsInput, records.value.record(owner)?.phase())
+        val freshPending = records.value.record(owner)?.pendingInputs
+        listener(com.hermesandroid.relay.network.upstream.GatewayBackgroundInteractionEvent.Expired(STORED_SESSION_ID, null, ask))
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.NeedsInput, records.value.record(owner)?.phase())
+        assertEquals(freshPending, records.value.record(owner)?.pendingInputs)
+        listener(com.hermesandroid.relay.network.upstream.GatewayBackgroundInteractionEvent.Expired(STORED_SESSION_ID, null, fresh))
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.Working, records.value.record(owner)?.phase())
+    }
+
+    @Test
     fun passiveHistoryRefreshShowsLoadingAndKeepsTranscriptOnFailure() {
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()

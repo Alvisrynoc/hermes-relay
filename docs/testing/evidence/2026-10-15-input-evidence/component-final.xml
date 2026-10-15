@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-10-15T07:09:38.895Z" time="3.939">
+  <testcase name="cachedBackgroundInputCannotReconfirmAfterWorkingButFreshEventsRemainTrusted" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest" time="3.153" />
+</testsuite>

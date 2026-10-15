@@ -626,7 +626,7 @@ class ChatViewModel : ViewModel() {
                     SessionActivityUpdate.PendingInputOpened(
                         owner = owner,
                         requestId = "checkpoint:${key.contextKey}:${key.sessionId}",
-                        confirmed = backgroundPendingInteractions.containsKey(key),
+                        confirmed = false,
                         generation = generation,
                         observedAtMillis = now,
                     ),
@@ -3009,6 +3009,12 @@ class ChatViewModel : ViewModel() {
                         backgroundPendingInteractions[key] =
                             BackgroundPendingInteraction(event.profile, event.ask)
                         backgroundNeedsInputKeys += key
+                        activityOwner(key.sessionId, key.contextKey)?.let { owner ->
+                            reduceSessionActivity(SessionActivityUpdate.PendingInputOpened(
+                                owner = owner, requestId = "background:${event.ask.kind}:${event.ask.requestId}",
+                                generation = sessionActivityGeneration.get(), observedAtMillis = System.currentTimeMillis(),
+                            ))
+                        }
                         ActiveTurnKeepAliveRegistry.setWaiting(key.keepAliveKey(), true)
                         publishBackgroundSessionActivity()
                     }
@@ -3048,6 +3054,12 @@ class ChatViewModel : ViewModel() {
                             } else {
                                 current
                             }
+                        }
+                        activityOwner(key.sessionId, key.contextKey)?.let { owner ->
+                            reduceSessionActivity(SessionActivityUpdate.PendingInputClosed(
+                                owner = owner, requestId = "background:${event.ask.kind}:${event.ask.requestId}",
+                                generation = sessionActivityGeneration.get(), observedAtMillis = System.currentTimeMillis(),
+                            ))
                         }
                         ActiveTurnKeepAliveRegistry.setWaiting(key.keepAliveKey(), false)
                         publishBackgroundSessionActivity()
