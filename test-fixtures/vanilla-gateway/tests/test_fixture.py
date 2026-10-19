@@ -46,6 +46,21 @@ class FixtureTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual({"detail": "Unauthorized"}, await response.json())
         self.assertEqual([], fixture._history_rows)
 
+    async def test_approval_remains_answerable_after_parent_terminal(self) -> None:
+        fixture, base_url = await self.start("post_turn_approval")
+        ws, _ = await self.connect(base_url)
+        await self.rpc(ws, 1, "client.capabilities", {"server_requests": True})
+        await self.frames_until(ws, lambda f: f.get("id") == 1)
+        await self.rpc(ws, 2, "prompt.submit")
+        frames = await self.frames_until(ws, lambda f: f.get("method") == "approval")
+        self.assertTrue(any(f.get("params", {}).get("type") == "message.complete" for f in frames))
+        self.assertFalse(fixture._running)
+        request = frames[-1]
+        self.assertEqual(1701, request["id"])
+        await ws.send_json({"jsonrpc": "2.0", "id": request["id"], "result": {"choice": "once"}})
+        await self.frames_until(ws, lambda f: f.get("params", {}).get("payload", {}).get("text") == "post-turn request settled")
+        self.assertIsNone(fixture._native_request)
+
     async def test_native_method_family_accepts_results_and_unsupported_errors(self) -> None:
         fixture, base_url = await self.start("server_requests")
         ws, _ = await self.connect(base_url)

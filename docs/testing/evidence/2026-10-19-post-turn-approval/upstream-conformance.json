@@ -1,0 +1,34 @@
+{
+  "checks": [
+    {
+      "contract": "gateway.server_requests",
+      "evidence": [
+        "tui_gateway/server_requests.py:89:typed request envelope",
+        "tui_gateway/server_requests.py:93:open request replay with accepted locks",
+        "tui_gateway/server_requests.py:281:result or error settlement",
+        "tui_gateway/server_requests.py:191:capability gate and partial timeout",
+        "tui_gateway/server_requests.py:164:scoped cancellation",
+        "tui_gateway/methods_prompt.py:1255:per-question lock RPC",
+        "tui_gateway/methods_voice.py:451:per-transport capabilities",
+        "tui_gateway/methods_session.py:2310:read-only open-request snapshot"
+      ],
+      "passed": false,
+      "problem": "Server request methods, envelope, capability, replay or settlement contract changed"
+    },
+    {
+      "contract": "gateway.message_complete",
+      "evidence": [
+        "tui_gateway/prompt_turn.py:1090:message.complete emit at line 1165"
+      ],
+      "passed": true,
+      "problem": null
+    }
+  ],
+  "gateway_runtime": "not_started",
+  "provider_calls": "not_run",
+  "scenario_manifest": "post_turn_approval.json",
+  "schema": 1,
+  "scope": "provider_free_gateway_scenario_conformance",
+  "upstream_clean": true,
+  "upstream_sha": "5fc490e2b34123212d73ef316086f939567a725a"
+}

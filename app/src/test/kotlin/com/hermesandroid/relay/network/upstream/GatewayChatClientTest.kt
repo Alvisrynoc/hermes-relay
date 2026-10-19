@@ -954,6 +954,125 @@ class GatewayChatClientTest {
     }
 
     @Test
+    fun ownedApprovalAfterParentCompletionIsNotRejectedAsMissingTurn() = runBlocking {
+        val r = Recorder()
+        val events = ConcurrentLinkedQueue<GatewayBackgroundInteractionEvent>()
+        client.setSessionInteractionListener(events::add)
+        client.sendTurn(null, "delegate fixture", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitRpc("prompt.submit")
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "parent finished") }, "live-1"))
+        assertTrue(r.completeLatch.await(5, TimeUnit.SECONDS))
+        nativeRequest(ws, JsonPrimitive("post-parent"), "approval",
+            """{"session_id":"live-1","command":"echo fixture","choices":["once","deny"]}""")
+        awaitCondition { events.any { it is GatewayBackgroundInteractionEvent.Requested } }
+        val ask = (events.single() as GatewayBackgroundInteractionEvent.Requested).ask
+        assertNull(harness.serverResponses.poll(100, TimeUnit.MILLISECONDS))
+        assertTrue(client.respondAsk(ask, "invalid-choice").isFailure)
+        client.respondAsk(ask, "once").getOrThrow()
+        val response = harness.serverResponses.poll(5, TimeUnit.SECONDS) ?: error("no approval response")
+        assertEquals(JsonPrimitive("post-parent"), response["id"])
+        assertEquals(JsonPrimitive("once"), (response["result"] as JsonObject)["choice"])
+        assertTrue(client.respondAsk(ask, "once").isFailure)
+        assertEquals(1, harness.rpcLog.count { it.first == "prompt.submit" })
+        assertTrue(harness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
+    fun postTurnApprovalQueueExpiryAndForeignSocketGuards() = runBlocking {
+        val events = ConcurrentLinkedQueue<GatewayBackgroundInteractionEvent>()
+        client.setSessionInteractionListener(events::add)
+        val r = Recorder()
+        client.sendTurn(null, "delegate fixture", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitRpc("prompt.submit")
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "done") }, "live-1"))
+        assertTrue(r.completeLatch.await(5, TimeUnit.SECONDS))
+        val params = """{"session_id":"live-1","command":"echo fixture","choices":["once","deny"]}"""
+        nativeRequest(ws, JsonPrimitive(17), "approval", params)
+        nativeRequest(ws, JsonPrimitive("17"), "approval", params)
+        awaitCondition { events.count { it is GatewayBackgroundInteractionEvent.Requested } == 1 }
+        val first = (events.first() as GatewayBackgroundInteractionEvent.Requested).ask
+        ws.send(harness.eventFrame("request.cancel", buildJsonObject { put("id", 17); put("method", "approval") }, "live-1"))
+        awaitCondition { events.count { it is GatewayBackgroundInteractionEvent.Requested } == 2 }
+        assertTrue(events.any { it is GatewayBackgroundInteractionEvent.Expired && it.ask.requestId == first.requestId })
+        assertTrue(client.respondAsk(first, "once").isFailure)
+        val second = (events.last() as GatewayBackgroundInteractionEvent.Requested).ask
+        client.respondAsk(second, "deny").getOrThrow()
+        assertEquals(JsonPrimitive("17"), harness.serverResponses.poll(5, TimeUnit.SECONDS)?.get("id"))
+        nativeRequest(ws, JsonPrimitive("foreign"), "approval", params.replace("live-1", "other-live"))
+        assertEquals(-32602, (harness.serverResponses.poll(5, TimeUnit.SECONDS)?.get("error") as JsonObject)["code"]?.jsonPrimitive?.intOrNull)
+        assertEquals(2, events.count { it is GatewayBackgroundInteractionEvent.Requested })
+        nativeRequest(ws, JsonPrimitive("socket-old"), "approval", params)
+        awaitCondition { events.count { it is GatewayBackgroundInteractionEvent.Requested } == 3 }
+        val stale = (events.last() as GatewayBackgroundInteractionEvent.Requested).ask
+        ws.close(1001, "fixture socket loss")
+        awaitCondition { client.connectionState.value != GatewayConnectionState.Ready }
+        assertTrue(client.respondAsk(stale, "once").isFailure)
+        assertTrue(harness.serverResponses.isEmpty())
+        assertEquals(1, harness.rpcLog.count { it.first == "prompt.submit" })
+        assertTrue(harness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
+    fun postTurnApprovalRemainsOwnedAcrossRealUnsolicitedStart() = runBlocking {
+        val events = ConcurrentLinkedQueue<GatewayBackgroundInteractionEvent>()
+        client.setSessionInteractionListener(events::add)
+        val parent = Recorder()
+        client.sendTurn(null, "fixture parent", null, parent.callbacks) { parent.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitRpc("prompt.submit")
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "done") }, "live-1"))
+        assertTrue(parent.completeLatch.await(5, TimeUnit.SECONDS))
+        val params = """{"session_id":"live-1","command":"echo fixture","choices":["once","deny"]}"""
+        nativeRequest(ws, JsonPrimitive("child-a"), "approval", params)
+        awaitCondition { events.any { it is GatewayBackgroundInteractionEvent.Requested } }
+        val ask = (events.first() as GatewayBackgroundInteractionEvent.Requested).ask
+        val next = Recorder()
+        client.setUnsolicitedTurnProvider { GatewayInboundTurnRegistration(next.callbacks, onHandle = { true }) }
+        ws.send(harness.eventFrame("message.start", null, "live-1"))
+        awaitCondition { next.starts.get() == 1 }
+        client.respondAsk(ask, "once").getOrThrow()
+        assertEquals(JsonPrimitive("child-a"), harness.serverResponses.poll(5, TimeUnit.SECONDS)?.get("id"))
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "next done") }, "live-1"))
+        assertTrue(next.completeLatch.await(5, TimeUnit.SECONDS))
+        nativeRequest(ws, JsonPrimitive("child-b"), "approval", params)
+        awaitCondition { events.count { it is GatewayBackgroundInteractionEvent.Requested } == 2 }
+        val expiring = (events.last() as GatewayBackgroundInteractionEvent.Requested).ask
+        val later = Recorder()
+        client.setUnsolicitedTurnProvider { GatewayInboundTurnRegistration(later.callbacks, onHandle = { true }) }
+        ws.send(harness.eventFrame("message.start", null, "live-1"))
+        awaitCondition { later.starts.get() == 1 }
+        ws.send(harness.eventFrame("request.cancel", buildJsonObject { put("id", "child-b"); put("method", "approval") }, "live-1"))
+        awaitCondition { events.any { it is GatewayBackgroundInteractionEvent.Expired && it.ask.requestId == expiring.requestId } }
+        assertTrue(expiring.ownershipToken.retired.get())
+        assertTrue(client.respondAsk(expiring, "once").isFailure)
+        assertEquals(1, harness.rpcLog.count { it.first == "prompt.submit" })
+        assertTrue(harness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
+    fun postTurnApprovalCannotReplyAfterProfileOrSessionChange() = runBlocking {
+        val events = ConcurrentLinkedQueue<GatewayBackgroundInteractionEvent>()
+        client.setSessionInteractionListener(events::add)
+        val r = Recorder()
+        client.sendTurn(null, "fixture", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitRpc("prompt.submit")
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "done") }, "live-1"))
+        assertTrue(r.completeLatch.await(5, TimeUnit.SECONDS))
+        nativeRequest(ws, JsonPrimitive("profile-old"), "approval",
+            """{"session_id":"live-1","command":"echo fixture","choices":["once","deny"]}""")
+        awaitCondition { events.isNotEmpty() }
+        val ask = (events.single() as GatewayBackgroundInteractionEvent.Requested).ask
+        client.sessionProfileProvider = { "other-profile" }
+        assertTrue(client.respondAsk(ask, "once").isFailure)
+        client.clearSession()
+        assertTrue(client.respondAsk(ask, "once").isFailure)
+        assertTrue(harness.serverResponses.isEmpty())
+    }
+
+    @Test
     fun `native approval queue keeps each decision and rejects answers after session clear`() = runBlocking {
         val r = Recorder()
         client.sendTurn(null, "hi", null, r.callbacks) { r.preflightFailures += it }

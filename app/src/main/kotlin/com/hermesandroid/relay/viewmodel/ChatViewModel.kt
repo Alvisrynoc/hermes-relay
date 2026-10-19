@@ -2900,6 +2900,7 @@ class ChatViewModel : ViewModel() {
             previousClient?.setColdPrewarmSessionReadyListener(null)
             previousClient?.setUnmatchedTurnCompleteListener(null)
             previousClient?.setBackgroundInteractionListener(null)
+            previousClient?.setSessionInteractionListener(null)
             previousClient?.setSubagentEventListener(null)
             previousClient?.setSessionDirectoryInvalidationListener(null)
         }
@@ -2999,6 +3000,17 @@ class ChatViewModel : ViewModel() {
                 storedSessionId = completion.storedSessionId,
                 expectedAssistantText = completion.expectedAssistantText,
             )
+        }
+        client?.setSessionInteractionListener { event ->
+            val handler = chatHandler
+            if (gatewayClient === client && streamingEndpoint == "gateway" && handler != null &&
+                handler.currentSessionId.value == event.storedSessionId &&
+                AgentDisplay.profileSessionKey(currentSessionProfileName()) == AgentDisplay.profileSessionKey(event.profile)) {
+                when (event) {
+                    is GatewayBackgroundInteractionEvent.Requested -> presentInteractionAsk(handler, event.ask)
+                    is GatewayBackgroundInteractionEvent.Expired -> expirePendingAsk(GatewayAskExpiry(event.ask.kind, event.ask.requestId))
+                }
+            }
         }
         client?.setBackgroundInteractionListener { event ->
             if (gatewayClient !== client) return@setBackgroundInteractionListener

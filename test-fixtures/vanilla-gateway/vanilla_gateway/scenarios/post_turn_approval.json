@@ -1,0 +1,51 @@
+{
+  "name": "post_turn_approval",
+  "live_session_id": "fixture-live-post-turn",
+  "stored_session_id": "fixture-stored-post-turn",
+  "profile": "default",
+  "contract_requirements": [
+    "gateway.message_complete",
+    "gateway.server_requests"
+  ],
+  "turns": [
+    {
+      "steps": [
+        {
+          "op": "event",
+          "type": "message.start"
+        },
+        {
+          "op": "event",
+          "type": "message.complete",
+          "payload": {
+            "text": "Parent complete."
+          }
+        },
+        {
+          "op": "set_running",
+          "value": false
+        },
+        {
+          "op": "server_request",
+          "id": 1701,
+          "method": "approval",
+          "payload": {
+            "command": "echo fixture",
+            "choices": [
+              "once",
+              "deny"
+            ]
+          }
+        },
+        {
+          "op": "event",
+          "type": "status.update",
+          "payload": {
+            "kind": "fixture",
+            "text": "post-turn request settled"
+          }
+        }
+      ]
+    }
+  ]
+}

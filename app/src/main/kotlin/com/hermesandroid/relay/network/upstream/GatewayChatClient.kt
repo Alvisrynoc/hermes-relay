@@ -453,6 +453,74 @@ class GatewayChatClient(
     private val retiredServerRequests = linkedSetOf<String>()
     private val abandonedReviewRequests = linkedSetOf<String>()
     private val deferredServerRequests = mutableListOf<DeferredServerRequest>()
+    private var sessionInteractionListener: ((GatewayBackgroundInteractionEvent) -> Unit)? = null
+    private var sessionInteractions: SessionInteractions? = null
+
+    /** Only an already attached, completed turn establishes this request-only owner. */
+    private inner class SessionInteractions(
+        val ready: CompletableDeferred<Unit>, val socket: WebSocket,
+        val liveId: String, val storedId: String, val profile: String?,
+    ) {
+        val mapper = GatewayEventMapper(GatewayTurnCallbacks(
+            onSessionId = {}, onStart = {}, onTextDelta = {}, onThinkingDelta = {},
+            onToolCallStart = { _, _, _ -> }, onToolCallDone = { _, _ -> }, onToolCallFailed = { _, _ -> },
+            onTurnComplete = {}, onReconcileRequired = {}, onComplete = {}, onUsage = {}, onError = {},
+            onToolGenerating = {}, onSubagentEvent = {}, onMoaReference = {},
+            onInteractionRequest = { emit(GatewayBackgroundInteractionEvent.Requested(storedId, profile, it)) },
+            onInteractionExpired = { expiry ->
+                lastAsk?.takeIf { it.kind == expiry.kind && it.requestId == expiry.requestId }?.let {
+                    emit(GatewayBackgroundInteractionEvent.Expired(storedId, profile, it))
+                }
+            },
+        ))
+        var lastAsk: GatewayAsk? = null
+        fun emit(event: GatewayBackgroundInteractionEvent) {
+            if (event is GatewayBackgroundInteractionEvent.Requested) lastAsk = event.ask
+            val listener = sessionInteractionListener
+            callbackDispatcher {
+                if (currentSessionInteractions() === this && sessionInteractionListener === listener &&
+                    (event !is GatewayBackgroundInteractionEvent.Requested ||
+                        (mapper.currentInteraction?.ownershipToken === event.ask.ownershipToken && !event.ask.ownershipToken.retired.get()))) {
+                    listener?.invoke(event)
+                }
+            }
+        }
+    }
+
+    fun setSessionInteractionListener(listener: ((GatewayBackgroundInteractionEvent) -> Unit)?) {
+        if (listener == null) clearSessionInteractions()
+        sessionInteractionListener = listener
+    }
+
+    private fun clearSessionInteractions() {
+        sessionInteractions?.mapper?.currentInteraction?.ownershipToken?.retired?.set(true)
+        sessionInteractions = null
+    }
+
+    private fun currentSessionInteractions(): SessionInteractions? {
+        val owner = sessionInteractions ?: return null
+        if (owner.ready !== readySignal || owner.socket !== webSocket || owner.liveId != liveSessionId ||
+            owner.storedId != storedSessionId || owner.profile != liveSessionProfile || owner.profile != currentSessionProfile()) {
+            clearSessionInteractions()
+            return null
+        }
+        return owner
+    }
+
+    private fun retainSessionInteractions() {
+        val ready = readySignal ?: return
+        val socket = webSocket ?: return
+        val live = liveSessionId ?: return
+        val stored = storedSessionId ?: return
+        if (currentSessionInteractions() == null) {
+            clearSessionInteractions()
+            sessionInteractions = SessionInteractions(ready, socket, live, stored, liveSessionProfile)
+        }
+    }
+
+    private fun foregroundPendingInteraction(): GatewayAsk? =
+        activeTurn?.pendingInteraction ?: currentSessionInteractions()?.mapper?.currentInteraction
+
     private val lazyLiveSessions = ConcurrentHashMap.newKeySet<String>()
     private val readyLiveSessions = ConcurrentHashMap.newKeySet<String>()
     private val sessionReadyWaiters = ConcurrentHashMap<String, CompletableDeferred<Unit>>()
@@ -765,6 +833,7 @@ class GatewayChatClient(
         onAttachmentFailure: ((String) -> Unit)? = null,
         onPreflightFailure: (reason: String) -> Unit,
     ): ActiveTurnHandle {
+        clearSessionInteractions()
         val turn = GatewayTurn(
             callbacks = dispatchOn(callbacks),
             androidOwned = true,
@@ -940,6 +1009,7 @@ class GatewayChatClient(
 
     /** Drop the remembered session so the next send creates a fresh one. */
     fun clearSession() {
+        clearSessionInteractions()
         prewarmRequestGeneration.incrementAndGet()
         liveSessionId = null
         storedSessionId = null
@@ -1802,9 +1872,12 @@ class GatewayChatClient(
         val key = ask.requestId ?: return Result.failure(GatewayRpcException("ask has no request id"))
         val open = synchronized(serverRequestLock) { openServerRequests[key] }
             ?: return Result.failure(GatewayRpcException("Request awaits reconnect replay or is no longer active"))
-        val turn = activeTurn
-        if (open.connection !== readySignal || rejoinInProgress || open.request.sessionId != liveSessionId ||
-            turn?.pendingInteraction?.requestId != key || turn.pendingInteraction?.serverRequest != true ||
+        val turn = activeTurn?.takeIf { it.pendingInteraction?.requestId == key }
+        val idle = currentSessionInteractions()?.takeIf { it.mapper.currentInteraction?.requestId == key }
+        val pending = turn?.pendingInteraction ?: idle?.mapper?.currentInteraction
+        if (open.connection !== readySignal || open.socket !== webSocket || rejoinInProgress || open.request.sessionId != liveSessionId ||
+            pending?.requestId != key || pending.serverRequest != true ||
+            (idle != null && pending.ownershipToken !== ask.ownershipToken) ||
             ask.ownershipToken.retired.get()
         ) return Result.failure(GatewayRpcException("Request is not owned by this conversation"))
         if (ask.kind == GatewayAsk.Kind.APPROVAL &&
@@ -1814,11 +1887,11 @@ class GatewayChatClient(
         }
         if (ask.kind == GatewayAsk.Kind.CLARIFY && ask.questions.isNotEmpty() && !cancel) {
             if (questionId == null || ask.questions.none { it.qid == questionId } ||
-                questionId in turn.pendingInteraction!!.ownershipToken.answers.get()) {
+                questionId in pending.ownershipToken.answers.get()) {
                 return Result.failure(GatewayRpcException("Clarification is not ready for this question"))
             }
-            val generation = turn.interactionGeneration
-            val owner = turn.pendingInteraction!!.ownershipToken
+            val generation = turn?.interactionGeneration ?: idle!!.mapper.interactionGeneration
+            val owner = pending.ownershipToken
             return rpc("clarify.lock", buildJsonObject {
                 put("request_id", open.request.id.content)
                 put("question_id", questionId)
@@ -1830,7 +1903,8 @@ class GatewayChatClient(
                         else throw GatewayRpcException("Invalid clarification acknowledgement")
                     else -> throw GatewayRpcException("Invalid clarification acknowledgement")
                 }
-                turn.acknowledgeClarify(key, questionId, value, outcome == GatewayAskResponse.EXPIRED, generation)
+                turn?.acknowledgeClarify(key, questionId, value, outcome == GatewayAskResponse.EXPIRED, generation)
+                    ?: idle?.mapper?.acknowledgeClarify(key, questionId, value, outcome == GatewayAskResponse.EXPIRED, generation)
                 if (activeTurn !== turn) activeTurn?.acknowledgeClarifyOwner(key, questionId, value, outcome == GatewayAskResponse.EXPIRED, owner)
                 if (outcome == GatewayAskResponse.EXPIRED || (result["remaining"] as? JsonArray)?.isEmpty() == true) retireServerRequest(key)
                 outcome
@@ -1850,7 +1924,8 @@ class GatewayChatClient(
                     put("jsonrpc", "2.0"); put("id", open.request.id); put("result", result)
                 }.toString()) == true) {
                 retireServerRequest(key)
-                turn.acknowledgeInteraction(GatewayAskExpiry(ask.kind, key))
+                turn?.acknowledgeInteraction(GatewayAskExpiry(ask.kind, key))
+                    ?: idle?.mapper?.acknowledgeInteraction(GatewayAskExpiry(ask.kind, key))
                 Result.success(GatewayAskResponse.ACCEPTED)
             } else Result.failure(GatewayRpcException("send failed — socket closed"))
         }
@@ -1923,9 +1998,9 @@ class GatewayChatClient(
             }
             openServerRequests[request.key] = OpenServerRequest(request, ready, maxOf(sequence, previous?.receivedSequence ?: sequence), socket)
         }
-        val pending = if (sid == liveSessionId) activeTurn?.pendingInteraction else backgroundTurns[sid]?.pendingAsk
+        val pending = if (sid == liveSessionId) foregroundPendingInteraction() else backgroundTurns[sid]?.pendingAsk
         if (pending == null || pending.requestId == request.key) {
-            if (sid == liveSessionId && activeTurn == null) {
+            if (sid == liveSessionId && activeTurn == null && currentSessionInteractions() == null) {
                 retireServerRequest(request.key)
                 serverRequestError(id, -32000, "No interactive turn is attached", ready)
             } else handleEvent(request.eventType, request.payload, sid, ready)
@@ -1956,7 +2031,7 @@ class GatewayChatClient(
                 it.connection === readySignal && it.request.sessionId == sessionId
             }
         } ?: return
-        val pending = if (sessionId == liveSessionId) activeTurn?.pendingInteraction else backgroundTurns[sessionId]?.pendingAsk
+        val pending = if (sessionId == liveSessionId) foregroundPendingInteraction() else backgroundTurns[sessionId]?.pendingAsk
         if (pending == null) {
             handleEvent(next.request.eventType, next.request.payload, next.request.sessionId, next.connection)
         }
@@ -1976,7 +2051,7 @@ class GatewayChatClient(
             val keys = synchronized(serverRequestLock) {
                 frames.mapNotNull(GatewayServerRequest::parse).filter { it.sessionId == sessionId }.map { it.key }.toSet() - retiredServerRequests
             }
-            val pending = if (sessionId == liveSessionId) activeTurn?.pendingInteraction else backgroundTurns[sessionId]?.pendingAsk
+            val pending = if (sessionId == liveSessionId) foregroundPendingInteraction() else backgroundTurns[sessionId]?.pendingAsk
             val pendingSequence = synchronized(serverRequestLock) {
                 openServerRequests[pending?.requestId]?.receivedSequence ?: Long.MIN_VALUE
             }
@@ -3235,6 +3310,7 @@ class GatewayChatClient(
         coldPrewarmSessionReadyListener = null
         unmatchedTurnCompleteListener = null
         backgroundInteractionListener = null
+        sessionInteractionListener = null
         processEventListener = null
         subagentEventListener = null
         sessionDirectoryInvalidationListener = null
@@ -3380,6 +3456,7 @@ class GatewayChatClient(
         _connectionState.value = GatewayConnectionState.Connecting
         val ready = CompletableDeferred<Unit>()
         readySignal = ready
+        clearSessionInteractions()
         synchronized(serverRequestLock) {
             openServerRequests.clear()
             deferredServerRequests.clear()
@@ -4041,7 +4118,7 @@ class GatewayChatClient(
         val terminal = type in setOf("message.complete", "error") ||
             (type == "session.info" && payload?.booleanField("running") == false)
         val requestOwner = eventSessionId?.let { sid ->
-            if (sid == liveSessionId) activeTurn?.pendingInteraction else backgroundTurns[sid]?.pendingAsk
+            if (sid == liveSessionId) foregroundPendingInteraction() else backgroundTurns[sid]?.pendingAsk
         }
         if (!requestsReconciled && terminal && requestOwner?.serverRequest == true && eventSessionId != null) {
             val key = ready to eventSessionId
@@ -4049,6 +4126,7 @@ class GatewayChatClient(
             val socket = webSocket ?: run { reconcilingServerRequests.remove(key); return }
             val turn = activeTurn.takeIf { eventSessionId == liveSessionId }
             val background = backgroundTurns[eventSessionId]
+            val idle = currentSessionInteractions().takeIf { it?.liveId == eventSessionId }
             scope.launch {
                 try {
                     // Read only the open-request snapshot. No event replay or ownership mutation.
@@ -4058,7 +4136,8 @@ class GatewayChatClient(
                     if (readySignal !== ready) return@launch
                     val stillOwned = (turn != null && activeTurn === turn && liveSessionId == eventSessionId) ||
                         (background != null && backgroundTurns[eventSessionId] === background) ||
-                        (turn != null && backgroundTurns.containsKey(eventSessionId))
+                        (turn != null && backgroundTurns.containsKey(eventSessionId)) ||
+                        (idle != null && currentSessionInteractions() === idle)
                     if (!stillOwned) return@launch
                     if (snapshot?.containsKey("open_requests") == true) replayServerRequests(snapshot, eventSessionId)
                     handleEvent(type, payload, eventSessionId, ready, requestsReconciled = true)
@@ -4310,6 +4389,15 @@ class GatewayChatClient(
         // the active personality here — for our own session only — so a
         // `/personality`, desktop, or TUI change keeps the app in sync. Falls
         // through to the turn dispatch below so an in-flight turn still sees it.
+        val idleInteractions = currentSessionInteractions()
+        if (idleInteractions != null && eventSessionId == idleInteractions.liveId &&
+            (activeTurn == null || payload?.stringField("request_id") == idleInteractions.mapper.currentInteraction?.requestId) &&
+            payload?.get("_server_request") == JsonPrimitive(true) &&
+            (type.endsWith(".request") || type.endsWith(".expire"))) {
+            idleInteractions.mapper.onEvent(type, payload)
+            return
+        }
+
         if (type == "session.info" &&
             (eventSessionId == null || eventSessionId == liveSessionId)
         ) {
@@ -4325,7 +4413,10 @@ class GatewayChatClient(
                     source = "session.info",
                 ) == true
             ) {
-                if (activeTurn === ownedTurn) activeTurn = null
+                if (activeTurn === ownedTurn) {
+                    retainSessionInteractions()
+                    activeTurn = null
+                }
                 if (!AppForegroundTracker.isForeground.value) scheduleBackgroundClose()
                 return
             }
@@ -4400,7 +4491,10 @@ class GatewayChatClient(
         }
         turn.onEvent(type, payload)
         if (turn.ended) {
-            if (activeTurn === turn) activeTurn = null
+            if (activeTurn === turn) {
+                if (type == "message.complete") retainSessionInteractions()
+                activeTurn = null
+            }
             if (AppForegroundTracker.isForeground.value.not()) scheduleBackgroundClose()
         }
     }
@@ -4492,6 +4586,7 @@ class GatewayChatClient(
             it.completeExceptionally(GatewayRpcException("gateway connection lost"))
         }
         pendingRpcs.clear()
+        clearSessionInteractions()
         synchronized(serverRequestLock) {
             openServerRequests.clear()
             deferredServerRequests.clear()
@@ -4681,6 +4776,7 @@ class GatewayChatClient(
     }
 
     private fun closeSocket(reason: String) {
+        clearSessionInteractions()
         webSocket?.close(1000, reason)
         webSocket = null
         connectedSocketProfile = null

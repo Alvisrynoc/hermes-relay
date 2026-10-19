@@ -4754,6 +4754,42 @@ class ChatViewModelGatewayInboundTurnTest {
     }
 
     @Test
+    fun ownedApprovalAfterParentTurnRendersAndRepliesWithoutStartingAnotherTurn() {
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        viewModel.sendMessage("Delegate synthetic child")
+        gatewayHarness.awaitRpc("prompt.submit")
+        serverWs.send(gatewayHarness.eventFrame("message.complete", buildJsonObject { put("text", "Parent finished") }, "live-resumed"))
+        awaitCondition { !handler.isStreaming.value }
+        serverWs.send(buildJsonObject {
+            put("jsonrpc", "2.0"); put("id", "post-parent-card"); put("method", "approval")
+            put("params", buildJsonObject {
+                put("session_id", "live-resumed"); put("command", "echo fixture")
+                put("choices", buildJsonArray { add(JsonPrimitive("once")); add(JsonPrimitive("deny")) })
+            })
+        }.toString())
+        awaitCondition { viewModel.pendingAsk.value != null }
+        val pending = requireNotNull(viewModel.pendingAsk.value)
+        assertFalse(handler.isStreaming.value)
+        assertTrue(handler.messages.value.any { message -> message.cards.any { it.id == pending.cardKey } })
+        // A real child-triggered turn may start while this independent request waits.
+        serverWs.send(gatewayHarness.eventFrame("message.start", null, "live-resumed"))
+        awaitCondition { handler.isStreaming.value }
+        assertEquals(pending, viewModel.pendingAsk.value)
+        assertTrue(handler.messages.value.any { message -> message.cards.any { it.id == pending.cardKey } })
+        viewModel.answerAsk(pending.messageId, pending.cardKey, "once")
+        val response = gatewayHarness.serverResponses.poll(5, TimeUnit.SECONDS) ?: error("missing approval reply")
+        assertEquals(JsonPrimitive("post-parent-card"), response["id"])
+        assertEquals("once", (response["result"] as kotlinx.serialization.json.JsonObject)["choice"]?.toString()?.trim('"'))
+        awaitCondition { viewModel.pendingAsk.value == null }
+        assertTrue(handler.isStreaming.value)
+        serverWs.send(gatewayHarness.eventFrame("message.complete", buildJsonObject { put("text", "Child update") }, "live-resumed"))
+        awaitCondition { !handler.isStreaming.value }
+        assertEquals(1, gatewayHarness.rpcLog.count { it.first == "prompt.submit" })
+        assertTrue(gatewayHarness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
     fun passiveHistoryRefreshShowsLoadingAndKeepsTranscriptOnFailure() {
         val started = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
