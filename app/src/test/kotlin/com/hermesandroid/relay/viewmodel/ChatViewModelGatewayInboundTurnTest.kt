@@ -2992,6 +2992,34 @@ class ChatViewModelGatewayInboundTurnTest {
     }
 
     @Test
+    fun authoritativeRosterRemovesOnlyMissingIdentifiedChildCardsAfterParentCompletion() {
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        viewModel.sendMessage("Delegate synthetic work")
+        gatewayHarness.awaitRpc("prompt.submit")
+        serverWs.send(gatewayHarness.eventFrame("message.start", null, "live-resumed"))
+        listOf("ended-child", "still-running").forEach { child ->
+            serverWs.send(gatewayHarness.eventFrame("subagent.start", buildJsonObject {
+                put("subagent_id", child); put("goal", "Synthetic work")
+            }, "live-resumed"))
+        }
+        awaitCondition { viewModel.subagentActivities.value.size == 2 }
+        serverWs.send(gatewayHarness.eventFrame("message.complete", buildJsonObject { put("text", "Launched") }, "live-resumed"))
+        awaitCondition { !handler.isStreaming.value }
+        assertEquals(2, viewModel.subagentActivities.value.count { !it.isTerminal })
+        gatewayHarness.subagentListPayload = buildJsonObject {
+            put("subagents", buildJsonArray { add(buildJsonObject { put("subagent_id", "still-running"); put("status", "running") }) })
+        }
+        viewModel.setChatVisible(true)
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.subagentActivities.value.map { it.subagentId } == listOf("still-running") }
+        assertFalse(viewModel.subagentActivities.value.single().isTerminal)
+        assertFalse(handler.isStreaming.value)
+        assertEquals(1, gatewayHarness.rpcLog.count { it.first == "prompt.submit" })
+        assertTrue(gatewayHarness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
     fun detachedChildRemainsPreviewableAfterParentCompletesAndAcceptsLateProgress() {
         viewModel.sendMessage("Delegate work")
         gatewayHarness.awaitRpc("prompt.submit")

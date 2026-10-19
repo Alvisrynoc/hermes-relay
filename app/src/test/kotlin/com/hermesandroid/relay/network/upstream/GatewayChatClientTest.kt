@@ -218,6 +218,9 @@ class GatewayClientHarness(
     }
 
     @Volatile
+    var subagentListPayload: JsonObject = buildJsonObject { put("subagents", buildJsonArray {}) }
+
+    @Volatile
     var activeSessionListPayload: JsonObject = buildJsonObject {
         put("sessions", JsonArray(emptyList()))
     }
@@ -360,6 +363,7 @@ class GatewayClientHarness(
                 )
                 "session.list" -> sessionListPayload
                 "session.active_list" -> activeSessionListPayload
+                "subagent.list" -> subagentListPayload
                 "session.title" -> buildJsonObject { put("ok", true) }
                 "prompt.submit" -> promptSubmitPayload
                 "session.interrupt" -> buildJsonObject { put("ok", true) }
@@ -951,6 +955,41 @@ class GatewayChatClientTest {
         harness.releaseAck(pending, buildJsonObject { put("profiles", JsonArray(emptyList())) })
         assertTrue(profiles.await().isSuccess)
         assertEquals(JsonPrimitive(pending.id), harness.serverResponses.poll(5, TimeUnit.SECONDS)?.get("id"))
+    }
+
+    @Test
+    fun subagentRosterRequiresInitializedOwnerAndCompleteValidSnapshot() = runBlocking {
+        assertTrue(client.prewarmAwait("stored-roster"))
+        val ws = harness.awaitServerSocket()
+        assertTrue(client.listActiveSubagentIds("stored-roster").isFailure)
+        assertTrue(harness.rpcLog.none { it.first == "subagent.list" })
+        val r = Recorder()
+        client.sendTurn("stored-roster", "work", null, r.callbacks) { r.preflightFailures += it }
+        harness.awaitRpc("prompt.submit")
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "launched") }, "live-resumed"))
+        assertTrue(r.completeLatch.await(5, TimeUnit.SECONDS))
+        // Complete callbacks precede retention; a same-socket reply observes the finished frame.
+        client.listProfiles().getOrThrow()
+        harness.subagentListPayload = buildJsonObject { put("subagents", buildJsonArray {
+            add(buildJsonObject { put("subagent_id", "live"); put("status", "running") })
+            add(buildJsonObject { put("subagent_id", "ended"); put("status", "completed") })
+        }) }
+        assertEquals(setOf("live"), client.listActiveSubagentIds("stored-roster").getOrThrow())
+        harness.subagentListPayload = buildJsonObject {}
+        assertTrue(client.listActiveSubagentIds("stored-roster").isFailure)
+        harness.subagentListPayload = buildJsonObject { put("subagents", buildJsonArray { add(buildJsonObject { put("subagent_id", 17) }) }) }
+        assertTrue(client.listActiveSubagentIds("stored-roster").isFailure)
+        harness.methodNotFound += "subagent.list"
+        assertTrue(client.listActiveSubagentIds("stored-roster").isFailure)
+        harness.methodNotFound -= "subagent.list"
+        assertEquals(4, harness.rpcLog.count { it.first == "subagent.list" })
+        harness.suppressAckMethods += "subagent.list"
+        val late = async(Dispatchers.IO) { client.listActiveSubagentIds("stored-roster") }
+        val ack = harness.awaitPendingAck()
+        client.clearSession()
+        harness.releaseAck(ack, buildJsonObject { put("subagents", buildJsonArray {}) })
+        assertTrue(late.await().isFailure)
+        assertTrue(harness.rpcLog.none { it.first == "session.interrupt" })
     }
 
     @Test

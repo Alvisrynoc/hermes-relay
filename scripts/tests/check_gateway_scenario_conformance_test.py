@@ -243,6 +243,12 @@ async def gateway_ws(ws):
     await handle_ws(ws, subprotocol=getattr(ws, "_hermes_ws_subprotocol", None))
 ''',
         }
+        sources["tui_gateway/methods_subagents.py"] = '\n'.join([
+            '_SUBAGENT_SNAPSHOT_FIELDS = ("subagent_id",)',
+            '@method("subagent.list")', 'def _(rid, params):',
+            '    owner = _current_session_steer_authority(params["session_id"])',
+            '    return {"subagents": _visible_subagent_records(owner), "delegations": []}',
+        ])
         sources.update({
             "tui_gateway/server_requests.py": NATIVE_REQUEST_SOURCE,
             "tui_gateway/contracts/server_requests.py": "\n".join(
@@ -257,6 +263,16 @@ async def gateway_ws(ws):
 
     def tearDown(self):
         self.temp.cleanup()
+
+    def test_subagent_roster_requires_authority_and_stable_identity(self):
+        self.assertTrue(module.audit_sources(self.root, (module.SUBAGENT_ROSTER,))[0].passed)
+        path = self.root / "tui_gateway/methods_subagents.py"
+        path.write_text(path.read_text().replace("_current_session_steer_authority", "unscoped_owner"), encoding="utf-8")
+        self.assertFalse(module.audit_sources(self.root, (module.SUBAGENT_ROSTER,))[0].passed)
+        path.write_text("def unrelated(): pass\n", encoding="utf-8")
+        self.assertFalse(module.audit_sources(self.root, (module.SUBAGENT_ROSTER,))[0].passed)
+        path.unlink()
+        self.assertFalse(module.audit_sources(self.root, (module.SUBAGENT_ROSTER,))[0].passed)
 
     def test_complete_contract_fixture_passes(self):
         results = module.audit_sources(self.root, module.ALL_CONTRACTS)

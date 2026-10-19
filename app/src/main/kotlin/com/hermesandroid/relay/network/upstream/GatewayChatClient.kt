@@ -3115,6 +3115,35 @@ class GatewayChatClient(
         )
     }
 
+    /** Read the complete live roster only for an already initialized, attached owner. */
+    suspend fun listActiveSubagentIds(storedId: String): Result<Set<String>> {
+        val live = currentLiveSessionId(storedId)
+            ?: return Result.failure(GatewayRpcException("No attached session"))
+        val ready = readySignal ?: return Result.failure(GatewayRpcException("Not connected"))
+        val socket = webSocket ?: return Result.failure(GatewayRpcException("Not connected"))
+        val profile = liveSessionProfile
+        if (_connectionState.value != GatewayConnectionState.Ready || rejoinInProgress ||
+            profile != currentSessionProfile() ||
+            (currentSessionInteractions() == null && live !in readyLiveSessions)) {
+            return Result.failure(GatewayRpcException("Session initialization is not confirmed"))
+        }
+        return rpc("subagent.list", buildJsonObject { put("session_id", live) },
+            expectedConnection = ready, expectedSocket = socket).mapCatching { result ->
+            if (ready !== readySignal || socket !== webSocket || rejoinInProgress ||
+                currentLiveSessionId(storedId) != live || liveSessionProfile != profile || currentSessionProfile() != profile) {
+                throw GatewayRpcException("Subagent roster owner changed")
+            }
+            val rows = result["subagents"] as? JsonArray
+                ?: throw GatewayRpcException("Subagent roster is unavailable")
+            rows.mapNotNull { element ->
+                val row = element as? JsonObject ?: throw GatewayRpcException("Invalid subagent roster")
+                val id = (row["subagent_id"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() }
+                    ?: throw GatewayRpcException("Subagent roster identity is missing")
+                if (row.stringField("status")?.lowercase() in setOf("completed", "complete", "failed", "error", "interrupted", "cancelled", "canceled")) null else id
+            }.toSet()
+        }
+    }
+
     /** Redirect one running child agent without interrupting the parent turn. */
     suspend fun steerSubagent(subagentId: String, text: String): Result<JsonObject> {
         val sessionId = liveSessionId

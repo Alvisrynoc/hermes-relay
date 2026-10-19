@@ -1,0 +1,5 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.viewmodel.SubagentActivityControllerTest" tests="2" skipped="0" failures="0" errors="0" timestamp="2026-10-19T06:21:29.638Z" time="0.006">
+  <testcase name="detached child survives parent completion and a new turn with stable preview identity" classname="com.hermesandroid.relay.viewmodel.SubagentActivityControllerTest" time="0.005" />
+  <testcase name="rosterAbsenceRetiresOnlyComparableUnchangedChildren" classname="com.hermesandroid.relay.viewmodel.SubagentActivityControllerTest" time="0.001" />
+  </testsuite>

@@ -294,6 +294,11 @@ class GatewayFixture:
                     {"text": "", "status": "interrupted"}, self.scenario.live_session_id,
                 )
             result = {"ok": True}
+        elif method == "subagent.list" and self.scenario.subagent_roster is not None:
+            if params.get("session_id") != self.scenario.live_session_id:
+                await self._rpc_error(socket, request_id, 4001, "session not found or not owned by this transport")
+                return
+            result = {"subagents": [dict(row) for row in self.scenario.subagent_roster], "delegations": []}
         elif method == "session.active_list" and self.scenario.active_list_supported:
             if self._active_list_snapshots:
                 self._last_active_list_snapshot = self._active_list_snapshots.popleft()

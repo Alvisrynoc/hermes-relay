@@ -11,6 +11,25 @@ class SubagentActivityControllerTest {
     private val controller = SubagentActivityController { now++ }
 
     @Test
+    fun rosterAbsenceRetiresOnlyComparableUnchangedChildren() {
+        controller.selectSession("parent", "scope")
+        controller.beginTurn("parent", "scope", "turn")
+        listOf("ended", "live", "fresh").forEachIndexed { i, id ->
+            controller.onSessionEvent("parent", "scope", event(i, GatewaySubagentEvent.Phase.START, subagentId = id), null)
+        }
+        controller.onSessionEvent("parent", "scope", event(3, GatewaySubagentEvent.Phase.START).copy(childSessionId = "durable-child"), null)
+        val revisions = controller.activities.value.associate { it.stableKey to it.revision }
+        controller.onSessionEvent("parent", "scope", event(2, GatewaySubagentEvent.Phase.PROGRESS, subagentId = "fresh", preview = "new"), null)
+        controller.reconcileRoster("parent", "foreign", revisions, emptySet())
+        assertEquals(4, controller.activities.value.size)
+        controller.reconcileRoster("parent", "scope", revisions, setOf("live"))
+        assertEquals(setOf("live", "fresh", null), controller.activities.value.map { it.subagentId }.toSet())
+        assertTrue(controller.activities.value.none { it.isTerminal })
+        controller.onSessionEvent("parent", "scope", event(0, GatewaySubagentEvent.Phase.START, subagentId = "ended"), null)
+        assertEquals(3, controller.activities.value.size)
+    }
+
+    @Test
     fun `open sheet keeps completed details across parent wake until dismissed`() {
         controller.selectSession("parent", "scope")
         controller.beginTurn("parent", "scope", "first")

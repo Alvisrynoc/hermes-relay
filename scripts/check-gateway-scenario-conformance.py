@@ -34,6 +34,7 @@ SESSION_RESUME = "gateway.session_resume_durable"
 SESSION_ACTIVE_LIST = "gateway.session_active_list"
 SESSION_EXCLUSIVE_SUBMIT = "gateway.session_exclusive_submit"
 SUBAGENT_CHILD_WATCH = "gateway.subagent_child_watch"
+SUBAGENT_ROSTER = "gateway.subagent_roster"
 SESSION_INITIALIZATION = "gateway.session_initialization"
 API_BOUNDARY = "api.fallback_boundary"
 CLARIFY = "gateway.clarify"
@@ -49,6 +50,7 @@ ALL_CONTRACTS = (
     SESSION_ACTIVE_LIST,
     SESSION_EXCLUSIVE_SUBMIT,
     SUBAGENT_CHILD_WATCH,
+    SUBAGENT_ROSTER,
     SESSION_INITIALIZATION,
     API_BOUNDARY,
 )
@@ -432,6 +434,23 @@ def _check_api_boundary(api: SourceFile) -> CheckResult:
         return CheckResult(contract, False, (), str(exc))
 
 
+def _check_subagent_roster(root: Path) -> CheckResult:
+    try:
+        source = SourceFile(root, "tui_gateway/methods_subagents.py")
+        handler = source.method_handler("subagent.list")
+        passed = (
+            {"session_id", "subagents", "delegations"} <= _string_constants(handler)
+            and bool(_call_lines(handler, "_current_session_steer_authority"))
+            and bool(_call_lines(handler, "_visible_subagent_records"))
+            and "subagent_id" in _string_constants(source.tree)
+        )
+        return CheckResult(SUBAGENT_ROSTER, passed,
+                           (source.evidence(handler, "authorized complete live roster with stable child identity"),),
+                           None if passed else "Session-scoped subagent roster contract changed")
+    except ValueError as exc:
+        return CheckResult(SUBAGENT_ROSTER, False, (), str(exc))
+
+
 def _check_subagent_child_watch(server: SourceFile, methods: SourceFile) -> CheckResult:
     contract = SUBAGENT_CHILD_WATCH
     try:
@@ -668,6 +687,7 @@ def audit_sources(root: Path, requirements: Iterable[str]) -> list[CheckResult]:
         SESSION_EXCLUSIVE_SUBMIT: lambda: _check_session_exclusive_submit(
             server, methods, prompt_methods, active_sessions,
         ),
+        SUBAGENT_ROSTER: lambda: _check_subagent_roster(root),
         SUBAGENT_CHILD_WATCH: lambda: _check_subagent_child_watch(server, methods),
         SESSION_INITIALIZATION: lambda: _check_session_initialization(server),
         API_BOUNDARY: lambda: _check_api_boundary(api),

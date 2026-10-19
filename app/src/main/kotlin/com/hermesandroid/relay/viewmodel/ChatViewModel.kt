@@ -2793,6 +2793,16 @@ class ChatViewModel : ViewModel() {
                     )
                 }
             }
+            val rosterRevisions = subagentActivities.value.filter { !it.isTerminal && !it.subagentId.isNullOrBlank() }
+                .associate { it.stableKey to it.revision }
+            if (currentOwner != null && rosterRevisions.isNotEmpty()) {
+                val navigation = threadNavigationGeneration.get()
+                val roster = client.listActiveSubagentIds(currentOwner.storedSessionId).getOrNull()
+                if (roster != null && gatewayClient === client && generation == sessionActivityGeneration.get() &&
+                    navigation == threadNavigationGeneration.get() && currentOwner == activityOwner(chatHandler?.currentSessionId?.value)) {
+                    subagentActivityController.reconcileRoster(currentOwner.storedSessionId, activeProfileContextKey, rosterRevisions, roster)
+                }
+            }
             projectCurrentBackgroundProcesses(generation, now)
         }
 

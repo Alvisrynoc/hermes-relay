@@ -1,0 +1,27 @@
+{
+  "checks": [
+    {
+      "contract": "gateway.message_complete",
+      "evidence": [
+        "tui_gateway/prompt_turn.py:1090:message.complete emit at line 1165"
+      ],
+      "passed": true,
+      "problem": null
+    },
+    {
+      "contract": "gateway.subagent_roster",
+      "evidence": [
+        "tui_gateway/methods_subagents.py:54:authorized complete live roster with stable child identity"
+      ],
+      "passed": true,
+      "problem": null
+    }
+  ],
+  "gateway_runtime": "not_started",
+  "provider_calls": "not_run",
+  "scenario_manifest": "subagent_roster_reconcile.json",
+  "schema": 1,
+  "scope": "provider_free_gateway_scenario_conformance",
+  "upstream_clean": true,
+  "upstream_sha": "5fc490e2b34123212d73ef316086f939567a725a"
+}

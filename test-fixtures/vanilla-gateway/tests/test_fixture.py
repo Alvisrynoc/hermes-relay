@@ -18,6 +18,18 @@ from vanilla_gateway.evidence import EvidenceLog  # noqa: E402
 
 
 class FixtureTestCase(unittest.IsolatedAsyncioTestCase):
+    async def test_subagent_roster_after_parent_completion_is_identity_scoped(self) -> None:
+        fixture, base_url = await self.start("subagent_roster_reconcile")
+        ws, _ = await self.connect(base_url)
+        await self.rpc(ws, 1, "prompt.submit")
+        await self.frames_until(ws, lambda f: f.get("params", {}).get("type") == "message.complete")
+        await self.rpc(ws, 2, "subagent.list", {"session_id": "fixture-live-roster"})
+        frames = await self.frames_until(ws, lambda f: f.get("id") == 2)
+        self.assertEqual([{"subagent_id": "still-running", "status": "running"}], frames[-1]["result"]["subagents"])
+        await self.rpc(ws, 3, "subagent.list", {"session_id": "foreign"})
+        frames = await self.frames_until(ws, lambda f: f.get("id") == 3)
+        self.assertEqual(4001, frames[-1]["error"]["code"])
+
     async def test_dashboard_setup_signin_expiry_and_loopback_are_distinct(self) -> None:
         fixture, base_url = await self.start("dashboard_onboarding")
         async with self.session.get(f"{base_url}/api/status") as response:
