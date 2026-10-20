@@ -1,5 +1,13 @@
 # Hermes-Relay — Dev Log
 
+## 2026-10-20 — Android 1.19.0 and Plugin 1.13.1 release preparation
+
+Prepared Android 1.19.0 (versionCode 60) and Plugin 1.13.1 from integrated reliability work, including oversized-history recovery in #767. CLI+UI remains 0.4.0-beta.10. Android copy includes 21 typed changes and four highlights; Plugin copy covers certificate chains, Secure Link session routes, speech renderer defaults, and strict authenticated desktop routing.
+
+History recovery passed 156 focused JVM tests, 40 shared Gateway fixture tests, current-upstream scenario conformance, and a Standard Phone API 36 rendered failure/reopen test. Hosted lint, debug builds, and focused tests passed for #767; the test lane required a retry after Maven HTTP 429 responses. Plugin source checks passed 78 tests and 58 subtests locally with nine platform/tool skips. Physical listening validation of recent voice changes remains incomplete. Screenshot reports #745 and #743 remain separate.
+
+Publication and deployment require the release-prepared tree's CI, signed Play preflight, protected promotion, immutable-tag workflows, and live verification.
+
 ## 2026-10-08 — CLI+UI beta.10 released and verified
 
 Published [Hermes-Relay CLI+UI 0.4.0-beta.10](https://github.com/Codename-11/hermes-relay/releases/tag/desktop-v0.4.0-beta.10) from immutable commit `95b74c91e5503fdb607ab793d74c2d99fef96ecc`. Structured CUA element actions accept current handles, including hexadecimal snapshot generations, and Activity distinguishes recorded CUA, system capture, compatibility, and missing backend metadata. Android and Plugin versions and the Bun 1.3.14 pin are unchanged.
