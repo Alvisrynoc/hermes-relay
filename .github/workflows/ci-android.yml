@@ -182,7 +182,12 @@ jobs:
         run: |
           ./gradlew :app:testSideloadDebugUnitTest \
             --tests com.hermesandroid.relay.network.ArchitectureBoundaryTest \
+            --tests com.hermesandroid.relay.network.upstream.DashboardApiClientTest \
+            --tests com.hermesandroid.relay.network.upstream.HermesApiClientTest \
+            --tests com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest \
             --tests com.hermesandroid.relay.network.relay.RelayUrlDeriverTest \
+            --tests com.hermesandroid.relay.data.RelayEndpointContractTest \
+            --tests com.hermesandroid.relay.network.relay.RelayHttpClientSessionPolicyTest \
             --tests com.hermesandroid.relay.network.shared.PluginProxyTransportTest \
             --tests '*GatewayChatClientTest*retarget*' \
             --tests '*RelayVoiceClientRoutingTest.proxyProviderOwnsBothVoiceSessionAndWebSocketRequests' \
@@ -204,17 +209,28 @@ jobs:
             --tests com.hermesandroid.relay.notifications.InteractionRequestNotifierTest \
             --tests com.hermesandroid.relay.ui.ChatNotificationNavigationTest \
             --tests com.hermesandroid.relay.ui.ChatNotificationNavigationUiTest \
+            --tests com.hermesandroid.relay.ui.StartupLoadingThemeTest \
             --tests com.hermesandroid.relay.viewmodel.ConnectionViewModelChatAlertsTest \
             --tests com.hermesandroid.relay.screenshots.ChatComposerProgressScreenshotTest \
             --tests com.hermesandroid.relay.screenshots.UnreadConversationsScreenshotTest \
             --tests com.hermesandroid.relay.ui.components.ProfileShelfPolicyTest \
             --tests com.hermesandroid.relay.viewmodel.VoiceInboundCompletionTest \
             --tests com.hermesandroid.relay.voice.VoiceViewModelBargeInTest \
+            --tests com.hermesandroid.relay.wake.WakeWordCoreTest \
+            --tests com.hermesandroid.relay.wake.WakeWordRecognitionTest \
+            --tests com.hermesandroid.relay.wake.WakeWordServiceHandoffTest \
             --tests com.hermesandroid.relay.voice.VoiceOutputFallbackTest \
+            --tests com.hermesandroid.relay.audio.RealtimePcmPlayerWriteTest \
+            --tests com.hermesandroid.relay.voice.StandardVoiceTurnPlaybackTest \
+            --tests com.hermesandroid.relay.voice.VoiceFilePlaybackCompletionTest \
+            --tests com.hermesandroid.relay.voice.AgentAudioCompletionDecisionTest \
             --tests com.hermesandroid.relay.voice.LegacyTtsTimingTest \
             --tests com.hermesandroid.relay.voice.VoiceViewModelPipelineTest \
             --tests com.hermesandroid.relay.audio.VoicePlayerTest \
             --tests com.hermesandroid.relay.screenshots.VoiceFallbackPresentationTest \
+            --tests com.hermesandroid.relay.screenshots.VoiceInterruptionSettingsTest \
+            --tests com.hermesandroid.relay.data.BargeInPreferencesTest \
+            --tests com.hermesandroid.relay.data.VoicePreferencesRepositoryTest \
             --tests com.hermesandroid.relay.viewmodel.ChatViewModelRealtimeTurnTest \
             --tests com.hermesandroid.relay.network.relay.RealtimeVoiceEventParsingTest \
             --tests com.hermesandroid.relay.voice.VoiceCommandInterpreterTest \

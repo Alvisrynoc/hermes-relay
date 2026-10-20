@@ -231,6 +231,8 @@ class GatewayFixture:
                 await self._rpc_error(socket, request_id, 4040, "Stored session not found")
                 return
             result = self._session_snapshot(include_stored=True)
+            result["message_count"] = len(self._history_rows)
+            result["messages"] = [] if params.get("omit_messages") else list(self._history_rows)
             if self._clarify is not None or self._native_request is not None:
                 self._clarify_owner = socket, connection
         elif method == "session.activate":
@@ -239,6 +241,8 @@ class GatewayFixture:
                 await self._rpc_error(socket, request_id, 4041, "Live session not found")
                 return
             result = self._session_snapshot(include_stored=True)
+            result["message_count"] = len(self._history_rows)
+            result["messages"] = [] if params.get("omit_messages") else list(self._history_rows)
             if self._clarify is not None or self._native_request is not None:
                 self._clarify_owner = socket, connection
         elif method == "prompt.submit":
@@ -486,13 +490,15 @@ class GatewayFixture:
     async def _history(self, request: web.Request) -> web.Response:
         if request.match_info["session_id"] != self.scenario.stored_session_id:
             raise web.HTTPNotFound(text="session not found")
-        limit = max(1, min(int(request.query.get("limit", "500")), 1_000))
+        limit = max(1, min(int(request.query.get("limit", "500")), 500))
         offset = max(0, int(request.query.get("offset", "0")))
         order = request.query.get("order", "asc")
         rows = list(self._history_rows)
-        if order == "desc":
+        if order in ("desc", "latest"):
             rows.reverse()
         page = rows[offset : offset + limit]
+        if order == "latest":
+            page.reverse()
         self.evidence.add("history", outcome="read")
         return web.json_response(
             {
