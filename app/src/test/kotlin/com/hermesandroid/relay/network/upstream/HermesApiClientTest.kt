@@ -22,6 +22,29 @@ import org.junit.Test
 class HermesApiClientTest {
 
     @Test
+    fun oversizedHistoryNeverBecomesAnEmptyApiTranscript() = runTest {
+        MockWebServer().use { server ->
+            server.dispatcher = object : okhttp3.mockwebserver.Dispatcher() {
+                override fun dispatch(request: okhttp3.mockwebserver.RecordedRequest) =
+                    MockResponse().setBody("{}").setHeader("Content-Length", 9 * 1024 * 1024)
+                        .setSocketPolicy(okhttp3.mockwebserver.SocketPolicy.DISCONNECT_AT_END)
+            }
+            try {
+                HermesApiClient(server.url("/").toString(), "test-key").getMessages("sess-a")
+                throw AssertionError("expected explicit history size failure")
+            } catch (error: SessionTranscriptTooLargeException) {
+                assertTrue(error.message!!.contains("no messages were skipped"))
+            }
+            assertEquals(9, server.requestCount)
+            repeat(server.requestCount) {
+                val request = server.takeRequest().requestUrl!!
+                assertEquals("0", request.queryParameter("offset"))
+                assertEquals("true", request.queryParameter("include_compacted"))
+            }
+        }
+    }
+
+    @Test
     fun getMessages_pagesApiFallbackOldestFirst() = runTest {
         val server = MockWebServer()
         server.start()
