@@ -761,6 +761,7 @@ class HermesApiClient(
             }
         }.getOrElse { error ->
             if (error is CancellationException) throw error
+            if (error is SessionTranscriptTooLargeException) throw error
             Log.w(TAG, "Failed to get messages: ${error.message}")
             emptyList()
         }

@@ -2509,11 +2509,15 @@ private fun Response.readJsonElement(json: Json): JsonElement {
     return json.parseToJsonElement(raw)
 }
 
+internal class JsonResponseTooLargeException : IOException(
+    "Dashboard response exceeds Android's bounded JSON limit",
+)
+
 internal fun okhttp3.ResponseBody.readUtf8Bounded(maxBytes: Long): String {
     require(maxBytes in 1..Int.MAX_VALUE.toLong()) { "Invalid response byte limit" }
     val declaredLength = contentLength()
     if (declaredLength > maxBytes) {
-        throw IOException("Dashboard response exceeds Android's bounded JSON limit")
+        throw JsonResponseTooLargeException()
     }
     val initialSize = when {
         declaredLength in 1..maxBytes -> declaredLength.toInt()
@@ -2528,7 +2532,7 @@ internal fun okhttp3.ResponseBody.readUtf8Bounded(maxBytes: Long): String {
             if (read < 0) break
             total += read
             if (total > maxBytes) {
-                throw IOException("Dashboard response exceeds Android's bounded JSON limit")
+                throw JsonResponseTooLargeException()
             }
             output.write(buffer, 0, read)
         }
