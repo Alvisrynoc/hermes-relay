@@ -1,0 +1,131 @@
+{
+  "date": "2026-10-19",
+  "baseline": "9e453b43d1c81099134dc8f1c6b0ad0af40e5851",
+  "jvm_selectors": [
+    "*ChatViewModelGatewayInboundTurnTest.authoritativeRosterRemovesOnlyMissingIdentifiedChildCardsAfterParentCompletion",
+    "*GatewayChatClientTest.subagentRosterRequiresInitializedOwnerAndCompleteValidSnapshot",
+    "*SubagentActivityControllerTest.rosterAbsenceRetiresOnlyComparableUnchangedChildren",
+    "*SubagentActivityControllerTest.detached child survives parent completion and a new turn with stable preview identity"
+  ],
+  "final_unique_jvm_cases": 4,
+  "runs": [
+    {
+      "stage": "baseline unchanged production",
+      "vm": {
+        "tests": 1,
+        "failures": 1,
+        "seconds": 9.346
+      },
+      "build": "FAILED 2m09s;31 tasks2 executed29 up-to-date"
+    },
+    {
+      "stage": "first four-case repair run",
+      "vm": {
+        "tests": 1,
+        "failures": 0,
+        "seconds": 4.443
+      },
+      "controller": {
+        "tests": 2,
+        "failures": 0,
+        "seconds": 0.006
+      },
+      "client": {
+        "tests": 1,
+        "failures": 1,
+        "seconds": 0.407
+      },
+      "reason": "Client test completion callback raced request-owner retention; added existing same-socket RPC barrier",
+      "build": "FAILED 2m22s;31 tasks5 executed26 up-to-date"
+    },
+    {
+      "stage": "client test barrier correction only",
+      "client": {
+        "tests": 1,
+        "failures": 0,
+        "seconds": 0.56
+      },
+      "build": "SUCCESSFUL46s;31 tasks2 executed29 up-to-date"
+    },
+    {
+      "stage": "final strengthened same client case",
+      "client": {
+        "tests": 1,
+        "failures": 0,
+        "seconds": 0.516
+      },
+      "build": "SUCCESSFUL38s;31 tasks2 executed29 up-to-date",
+      "note": "Positive authorized snapshot precedes negative checks; RPC count proves all four responses exercised"
+    },
+    {
+      "stage": "declarative fixture",
+      "selector": "test_subagent_roster_after_parent_completion_is_identity_scoped",
+      "tests": 1,
+      "failures": 0,
+      "seconds": 0.524
+    },
+    {
+      "stage": "initial checker regression",
+      "selector": "test_subagent_roster_requires_authority_and_stable_identity",
+      "tests": 1,
+      "failures": 0,
+      "seconds": 0.077
+    },
+    {
+      "stage": "existing checker fixture control",
+      "selector": "test_complete_contract_fixture_passes",
+      "tests": 1,
+      "failures": 0,
+      "seconds": 0.074
+    },
+    {
+      "stage": "final strengthened checker regression",
+      "selector": "test_subagent_roster_requires_authority_and_stable_identity",
+      "tests": 1,
+      "failures": 0,
+      "seconds": 0.078,
+      "note": "Includes removed authority, missing method and missing file"
+    },
+    {
+      "stage": "current-upstream source conformance",
+      "upstream_sha": "5fc490e2b34123212d73ef316086f939567a725a",
+      "upstream_clean": true,
+      "passed": [
+        "gateway.message_complete",
+        "gateway.subagent_roster"
+      ],
+      "gateway_runtime": "not_started",
+      "provider_calls": "not_run"
+    }
+  ],
+  "source_sha256": {
+    "app/src/main/kotlin/com/hermesandroid/relay/network/upstream/GatewayChatClient.kt": "203389d79d011475e37fb679656639c17bfa3d2d032802d7fd03dba3f323d6f9",
+    "app/src/main/kotlin/com/hermesandroid/relay/viewmodel/ChatViewModel.kt": "41b3cc1838c7a10d797c3ef5e71e166abfa065621b494ddf4091f22e8fe7a132",
+    "app/src/main/kotlin/com/hermesandroid/relay/viewmodel/SubagentActivityController.kt": "ed2f9ce41e504da2aa65dc3002dd3b74414846a9368c1af97530249fb1b166c6",
+    "app/src/test/kotlin/com/hermesandroid/relay/network/upstream/GatewayChatClientTest.kt": "ebd605abddaccdf3d7fdf3094ee942146833995a3b08527063ce922a39c23d6b",
+    "app/src/test/kotlin/com/hermesandroid/relay/viewmodel/ChatViewModelGatewayInboundTurnTest.kt": "696ed9af0a1a9ea2d84f6a5f85e7108202a578132e98201d1faaa927aab2dc83",
+    "app/src/test/kotlin/com/hermesandroid/relay/viewmodel/SubagentActivityControllerTest.kt": "ae7c492ff1315818329c1225279542120d677a763f8b57cc31c9908b2ff56862",
+    "scripts/check-gateway-scenario-conformance.py": "af8148041aecce2aac76bec12c587a7e19e81e41deb02345377cdf201e21c0ca",
+    "scripts/tests/check_gateway_scenario_conformance_test.py": "666388e2c1ceaca9d2173728f0b8e206d68590759178565e506c7793a690ac2b",
+    "test-fixtures/vanilla-gateway/tests/test_fixture.py": "5e365b55082ac2b2b08d460a1601f4904cec25d8e1ef79ef9abd5b6d61181b78",
+    "test-fixtures/vanilla-gateway/vanilla_gateway/scenario.py": "2beee2832c5284372583925a0b2a9933adc8fa1cd652006fda48f7612218e805",
+    "test-fixtures/vanilla-gateway/vanilla_gateway/server.py": "5a28f2c43ad8fefd846a5c7ee17d3f35b74b46f6f532ae290785dc6ad55d4c1e",
+    "test-fixtures/vanilla-gateway/vanilla_gateway/scenarios/subagent_roster_reconcile.json": "e50869de8a57560c09cec905286edfe30ce19bb1c01f10f6b5166b898fcb1183"
+  },
+  "matching_test_checkout": {
+    "app/src/main/kotlin/com/hermesandroid/relay/network/upstream/GatewayChatClient.kt": true,
+    "app/src/main/kotlin/com/hermesandroid/relay/viewmodel/ChatViewModel.kt": true,
+    "app/src/main/kotlin/com/hermesandroid/relay/viewmodel/SubagentActivityController.kt": true,
+    "app/src/test/kotlin/com/hermesandroid/relay/network/upstream/GatewayChatClientTest.kt": true,
+    "app/src/test/kotlin/com/hermesandroid/relay/viewmodel/ChatViewModelGatewayInboundTurnTest.kt": true,
+    "app/src/test/kotlin/com/hermesandroid/relay/viewmodel/SubagentActivityControllerTest.kt": true
+  },
+  "not_run": [
+    "APK assembly",
+    "Android instrumentation",
+    "emulator",
+    "physical device",
+    "whole test suites",
+    "live Gateway/provider"
+  ]
+}

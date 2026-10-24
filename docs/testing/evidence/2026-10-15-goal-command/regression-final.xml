@@ -1,0 +1,15 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<testsuite name="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" tests="12" skipped="0" failures="0" errors="0" timestamp="2026-10-14T16:58:59.746Z" time="5.327">
+  <testcase name="existingGoalResumeFailureDoesNotCreateOrDispatch" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="3.292" />
+  <testcase name="coldObservedGoalResumesExactStoredConversation" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.193" />
+  <testcase name="goalKickoffSubmitsTransportPromptWithLiteralDisplay" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.161" />
+  <testcase name="goalReplyAfterOwnerSwitchCannotSubmitForeignKickoff" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.098" />
+  <testcase name="goalImmediatelyAfterSuccessfulSendKeepsExistingBinding" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.095" />
+  <testcase name="lateNonGoalDirectiveCannotSubmitIntoChangedOwner" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.069" />
+  <testcase name="ownerSwitchDuringGoalAttachmentDoesNotDispatch" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.067" />
+  <testcase name="publicGoalCatalogReplyCannotMoveTheInvocationToAnotherOwner" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.107" />
+  <testcase name="returningToSameOwnerDoesNotReviveAnOldGoalDirective" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.07" />
+  <testcase name="genuineDraftGoalCreatesOnlyItsNormalSelectedSession" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.071" />
+  <testcase name="quickCommandRemainsSessionlessWithoutCreatingConversation" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.089" />
+  <testcase name="idleReconnectAfterSuccessfulSendResumesTheSameGoalConversation" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGoalCommandTest" time="0.127" />
+</testsuite>

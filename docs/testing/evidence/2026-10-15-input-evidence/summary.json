@@ -1,0 +1,84 @@
+{
+  "baseline": "2945649d79e5855f349a662f0e9398461da920ff",
+  "results": {
+    "unit-red.xml": {
+      "tests": "6",
+      "failures": "3",
+      "errors": "0",
+      "time": "0.06",
+      "selectors": [
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.cachedCheckpointInputCannotOverrideConfirmedWorkingOrReturnAfterPolling",
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWorkingPreservesInputNewerThanSnapshot",
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWorkingClearsOlderPendingInputOnlyForItsOwner",
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.processUpdatesDoNotMakeAnOldInputNewerThanWorkingSnapshot",
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.liveWorkingDiscardsUnconfirmedColdCheckpointInput",
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWaitingPreservesOlderPendingInput"
+      ]
+    },
+    "component-draft-setup.xml": {
+      "tests": "1",
+      "failures": "1",
+      "errors": "0",
+      "time": "4.562",
+      "selectors": [
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest.cachedBackgroundInputCannotReconfirmAfterWorkingButFreshEventsRemainTrusted"
+      ]
+    },
+    "component-red.xml": {
+      "tests": "1",
+      "failures": "1",
+      "errors": "0",
+      "time": "4.017",
+      "selectors": [
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest.cachedBackgroundInputCannotReconfirmAfterWorkingButFreshEventsRemainTrusted"
+      ]
+    },
+    "unit-final.xml": {
+      "tests": "6",
+      "failures": "0",
+      "errors": "0",
+      "time": "0.01",
+      "selectors": [
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.cachedCheckpointInputCannotOverrideConfirmedWorkingOrReturnAfterPolling",
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWorkingPreservesInputNewerThanSnapshot",
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWorkingClearsOlderPendingInputOnlyForItsOwner",
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.processUpdatesDoNotMakeAnOldInputNewerThanWorkingSnapshot",
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.liveWorkingDiscardsUnconfirmedColdCheckpointInput",
+        "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWaitingPreservesOlderPendingInput"
+      ]
+    },
+    "component-final.xml": {
+      "tests": "1",
+      "failures": "0",
+      "errors": "0",
+      "time": "3.939",
+      "selectors": [
+        "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest.cachedBackgroundInputCannotReconfirmAfterWorkingButFreshEventsRemainTrusted"
+      ]
+    }
+  },
+  "final_build": "passed; 2m26s; 31 tasks (5 executed, 26 up-to-date)",
+  "classification": {
+    "unit": "Six pure registry reducer checks",
+    "component_integration": "One in-process production VM callback/cache-publication case; not wire delivery or rendering"
+  },
+  "canonical_target": "scripts/android-lane.ps1 gradle :app:testSideloadDebugUnitTest with exactly the seven final selectors below; --no-daemon --console=plain",
+  "final_selectors": [
+    "com.hermesandroid.relay.data.SessionActivityRegistryTest.cachedCheckpointInputCannotOverrideConfirmedWorkingOrReturnAfterPolling",
+    "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWorkingPreservesInputNewerThanSnapshot",
+    "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWorkingClearsOlderPendingInputOnlyForItsOwner",
+    "com.hermesandroid.relay.data.SessionActivityRegistryTest.processUpdatesDoNotMakeAnOldInputNewerThanWorkingSnapshot",
+    "com.hermesandroid.relay.data.SessionActivityRegistryTest.liveWorkingDiscardsUnconfirmedColdCheckpointInput",
+    "com.hermesandroid.relay.data.SessionActivityRegistryTest.authoritativeWaitingPreservesOlderPendingInput",
+    "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest.cachedBackgroundInputCannotReconfirmAfterWorkingButFreshEventsRemainTrusted"
+  ],
+  "source_sha256": {
+    "app/src/main/kotlin/com/hermesandroid/relay/data/SessionActivityRegistry.kt": "7ba6f0852b0ccda64b95a79bbbb9390909179511232b58710218de78b7f89d8a",
+    "app/src/main/kotlin/com/hermesandroid/relay/viewmodel/ChatViewModel.kt": "0337ba47cc133e548932382e765968d70f82c0e20d59d9f94c9500b24e8b6bc7",
+    "app/src/test/kotlin/com/hermesandroid/relay/data/SessionActivityRegistryTest.kt": "e58b9682feab60126443c116bb21a6b5af898ac70aad0f500b439f5b92c5db6d",
+    "app/src/test/kotlin/com/hermesandroid/relay/viewmodel/ChatViewModelGatewayInboundTurnTest.kt": "f143e8503a16a0253b8b9a93d8318f411f4596d92bda575094510f826c74ccfd"
+  },
+  "test_only_patch_sha256": "d47b3bf6586e582fefdf038546ede7ce25a34017ea35865afcbcdfc6e8a539a4",
+  "apk_work": "Not requested or executed. No APK assemble, install, emulator, or AndroidTest task was run. This repair is source-only.",
+  "live_limit": "Synthetic reducer/callback checks do not establish live request absence, rendered behavior, notifications, or wire delivery."
+}

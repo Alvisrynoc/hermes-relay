@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-10-19T06:23:01.791Z" time="0.56">
+  <testcase name="subagentRosterRequiresInitializedOwnerAndCompleteValidSnapshot" classname="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" time="0.555" />
+  </testsuite>

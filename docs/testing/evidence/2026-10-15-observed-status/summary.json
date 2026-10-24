@@ -1,0 +1,40 @@
+{
+  "baseline": "819f58df0db7bb3df91b115e4ad52aa19a93b256",
+  "integration": {
+    "tests": 2,
+    "passed": 2,
+    "seconds": 6.041,
+    "build": "passed; 1m24s",
+    "selectors": [
+      "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest.observedSubagentCountStaysWithExactOwnerAndClearsWhenUnavailable",
+      "com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest.idleParentWithObservedChildrenPollsCompletionAtBusyCadence"
+    ],
+    "evidence": "integration-final.xml"
+  },
+  "baseline_limit": "Child cadence control also passes before the edit; fixture/startup callbacks prevent attributing that result solely to the child-only timer. No red claim.",
+  "source_sha256": {
+    "app/src/main/kotlin/com/hermesandroid/relay/viewmodel/ChatViewModel.kt": "b9eb6870d67ce99584d6ec1ea28cf95b967008a73cea4db3118bf77cc8112339",
+    "app/src/main/kotlin/com/hermesandroid/relay/ui/screens/ChatScreen.kt": "66c7ae6b562dea304f1c48d9787a6a4920277cd52ea10837b33c59eec2edc1ea",
+    "app/src/main/res/values/strings.xml": "ecb5563f2e33aeadd4acb392304f28d8f4cff9dddbb4b9aeebc794757272616b",
+    "app/src/test/kotlin/com/hermesandroid/relay/viewmodel/ChatViewModelGatewayInboundTurnTest.kt": "de8da60e6f7a7fe881a11027381e1c237c2cf912b284f68376296e16d1451ae3",
+    "app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/ObservedChatStatusInstrumentedTest.kt": "3a0a9ace2820f3fc8d60818dcdb4586b49f03b8642d3bd36df099ab4916b9927",
+    "app/src/androidTest/kotlin/com/hermesandroid/relay/viewmodel/GatewayForegroundRecoveryInstrumentedTest.kt": "694e4ab9c59b61c63dc837cf5e69252d763b61762e63038ccbb8e09439fb8d67"
+  },
+  "runtime_fixture_sha256": "482483174fcbd8e3bf4e44ff99c10112f7f730f70f7b946187c215dd7df4f0bc",
+  "runtime_fixture_limit": "Isolated fixture additionally retains inactive cap/history fields from earlier system tests; this status scenario uses only the reviewed active-list fields. Production VM and ChatScreen sources match primary.",
+  "runtime": {
+    "status": "passed",
+    "level": "system",
+    "selector": "com.hermesandroid.relay.viewmodel.ObservedChatStatusInstrumentedTest#observedWorkingChildrenAndIdleStayVisibleWithoutOwningTheTurn",
+    "tests": 1,
+    "seconds": 11.338,
+    "platform": "Pixel 6 AOSP x86_64 API 36",
+    "apk_build": "passed; 44s; 71 tasks (7 executed, 64 up-to-date)",
+    "apk_sha256": {
+      "sideload/debug/hermes-relay-1.18.1-sideload-debug.apk": "b4c9be792c87187ea176d54429e501f4230d7782ede2dda303858fbe65bb8097",
+      "androidTest/sideload/debug/hermes-relay-1.18.1-sideload-debug-androidTest.apk": "284770157ef8f0b439506c04c5addee0767a1fd68f4841139420c9c7b6df32b4"
+    },
+    "test_only_patch_sha256": "d93d5ba61bd992fce2c2e889a5431c6833c0653ef5ad6beb05b3ea16279298b4",
+    "evidence": "runtime-final.txt"
+  }
+}

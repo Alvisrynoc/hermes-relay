@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-10-14T10:32:09.084Z" time="0.538">
+  <testcase name="active snapshot child count is optional and nonnegative" classname="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" time="0.533" />
+</testsuite>

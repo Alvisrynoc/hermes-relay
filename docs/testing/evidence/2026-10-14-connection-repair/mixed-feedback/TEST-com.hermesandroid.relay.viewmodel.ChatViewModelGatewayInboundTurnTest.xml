@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-10-14T10:02:27.350Z" time="31.193">
+  <testcase name="passiveHistoryRefreshShowsLoadingAndKeepsTranscriptOnFailure" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest" time="2.863" />
+</testsuite>

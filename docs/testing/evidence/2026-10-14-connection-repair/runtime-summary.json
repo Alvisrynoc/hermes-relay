@@ -1,0 +1,24 @@
+{
+  "product_commit": "b99af532f2db8c39c81bd5665507d9a5c20992c9",
+  "result": "passed",
+  "test_count": 4,
+  "run_seconds": 30.103,
+  "emulator": "Pixel6 AOSP x86_64 API36",
+  "serial": "emulator-5560",
+  "adb_port": 5038,
+  "app_apk_sha256": "5023BA5488E508D816C81E693D2EFB988EF3ECC4D06B45CB450DC09E2ABE7C70",
+  "test_apk_sha256": "D290F6A135B558D7C55E91CD124B7C6825E49D16A86298F45344F92C991571AE",
+  "test_patch_sha256": "DA768806BE3FBD9A2D64BD9E7D7E4E9097710A267B16DE27E030C56BD87530F6",
+  "selectors": [
+    "largeHistoryAttachment_survivesTransportCapAndSends",
+    "recentHistory_refreshShowsLoadingErrorAndRetainsTranscript",
+    "desktopInput_postsOwnedNotificationAndReviewRendersAuthenticatedCard",
+    "observedSubagents_renderOnlyCurrentConversationAndClearOnSwitch"
+  ],
+  "limitations": [
+    "Synthetic loopback server; no real provider, credentials or conversations",
+    "ConnectionViewModel header and complete MainActivity notification navigation are outside this narrow harness",
+    "Direct ViewModel send; returned reply read with normal list scrolling; automatic Send-button follow is outside this test",
+    "Samsung physical sound, vibration, background delivery and Meshnet behavior require device validation"
+  ]
+}

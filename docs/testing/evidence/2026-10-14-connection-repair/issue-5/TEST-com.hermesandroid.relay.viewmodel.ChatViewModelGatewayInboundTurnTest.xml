@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-10-14T10:32:10.317Z" time="4.392">
+  <testcase name="observedSubagentCountStaysWithExactOwnerAndClearsWhenUnavailable" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest" time="3.358" />
+</testsuite>

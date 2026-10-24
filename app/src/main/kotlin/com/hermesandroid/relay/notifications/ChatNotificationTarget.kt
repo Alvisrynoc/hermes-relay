@@ -15,8 +15,9 @@ data class ChatNotificationTarget(
         .appendPath(connectionId).appendPath(AgentDisplay.profileSessionKey(profile))
         .appendPath(sessionId).build().toString()
 
-    fun route(): String = "chat?connectionId=${Uri.encode(connectionId)}" +
-        "&sessionId=${Uri.encode(sessionId)}&profile=${Uri.encode(profile ?: DEFAULT_PROFILE)}"
+    fun route(reviewInput: Boolean = false): String = "chat?connectionId=${Uri.encode(connectionId)}" +
+        "&sessionId=${Uri.encode(sessionId)}&profile=${Uri.encode(profile ?: DEFAULT_PROFILE)}" +
+        if (reviewInput) "&reviewInput=true" else ""
 
     companion object {
         const val DEFAULT_PROFILE = "__server_default__"

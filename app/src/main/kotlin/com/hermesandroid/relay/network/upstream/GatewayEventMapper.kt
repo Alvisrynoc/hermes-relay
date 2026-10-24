@@ -557,7 +557,9 @@ class GatewayEventMapper(
                 kind = GatewayAsk.Kind.APPROVAL,
                 // Legacy approvals correlate per session. Only an admitted native
                 // frame supplies the typed request key through this internal marker.
-                requestId = payload.string("request_id").takeIf { payload.boolean("_server_request") == true },
+                requestId = payload.string("request_id").takeIf {
+                    payload.boolean("_server_request") == true || payload.boolean("_canonical_prompt") == true
+                },
                 serverRequest = payload.boolean("_server_request") == true,
                 text = listOfNotNull(payload.string("command"), payload.string("description"))
                     .joinToString(" — ")
@@ -642,7 +644,9 @@ class GatewayEventMapper(
             // Legacy approval expiry is session-scoped; native cancellation is exact-id.
             "approval.expire" -> GatewayAskExpiry(
                 kind = GatewayAsk.Kind.APPROVAL,
-                requestId = payload.string("request_id").takeIf { payload.boolean("_server_request") == true },
+                requestId = payload.string("request_id").takeIf {
+                    payload.boolean("_server_request") == true || payload.boolean("_canonical_prompt") == true
+                },
             )
 
             else -> null

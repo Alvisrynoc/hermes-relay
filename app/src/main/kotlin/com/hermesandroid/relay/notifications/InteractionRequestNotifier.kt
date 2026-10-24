@@ -128,7 +128,7 @@ object InteractionRequestNotifier {
                 .authority("interaction")
                 .appendPath(requestKey)
                 .build()
-            putExtra(MainActivity.EXTRA_NAV_ROUTE, target?.route() ?: chatRoute(sessionId, profile))
+            putExtra(MainActivity.EXTRA_NAV_ROUTE, target?.route(reviewInput = true) ?: chatRoute(sessionId, profile))
         }
         val tapPending = PendingIntent.getActivity(
             context,
@@ -219,6 +219,7 @@ object InteractionRequestNotifier {
                 description = "Alerts when a Hermes turn is waiting for your response."
                 lockscreenVisibility = Notification.VISIBILITY_PRIVATE
                 setShowBadge(true)
+                  enableVibration(true)
             },
         )
     }

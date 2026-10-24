@@ -15,16 +15,31 @@ class SessionMessagePaginationTest {
         val requests = mutableListOf<SessionMessagePageRequest>()
         val result = loadSessionMessages(SessionMessageLoadMode.LATEST) { request ->
             requests += request
-            if (request.limit > 125) {
+            if (request.limit > 25) {
                 Result.failure(JsonResponseTooLargeException())
             } else {
                 Result.success(page(1_000 - request.offset - request.limit, request.limit))
             }
         }.getOrThrow()
 
-        assertEquals((500 until 1_000).map(Int::toString), result.map { it.id })
-        assertEquals(listOf(500, 250, 125, 125, 125, 125), requests.map { it.limit })
-        assertEquals(listOf(0, 0, 0, 125, 250, 375), requests.map { it.offset })
+        assertEquals((950 until 1_000).map(Int::toString), result.map { it.id })
+        assertEquals(listOf(50, 25, 25), requests.map { it.limit })
+        assertEquals(listOf(0, 0, 25), requests.map { it.offset })
+    }
+
+    @Test
+    fun `older window shrinks oversized pages without gaps or reversing chronology`() = runTest {
+        val requests = mutableListOf<SessionMessagePageRequest>()
+        val result = loadSessionMessages(SessionMessageLoadMode.Older(100)) { request ->
+            requests += request
+            if (request.limit > 25) Result.failure(JsonResponseTooLargeException())
+            else Result.success(page(1_000 - request.offset - request.limit, request.limit))
+        }.getOrThrow()
+
+        assertEquals((850 until 900).map(Int::toString), result.map { it.id })
+        assertEquals(listOf(50, 25, 25), requests.map { it.limit })
+        assertEquals(listOf(100, 100, 125), requests.map { it.offset })
+        assertEquals(listOf("latest", "latest", "latest"), requests.map { it.order })
     }
 
     @Test
@@ -109,13 +124,13 @@ class SessionMessagePaginationTest {
         var captured: SessionMessagePageRequest? = null
         val result = loadSessionMessages(SessionMessageLoadMode.LATEST) { request ->
             captured = request
-            Result.success(page(500, 500, returned = 500))
+            Result.success(page(500, 50, returned = 50))
         }.getOrThrow()
 
-        assertEquals(500, result.size)
+        assertEquals(50, result.size)
         assertEquals("latest", captured?.order)
         assertEquals(0, captured?.offset)
-        assertEquals(500, captured?.limit)
+        assertEquals(50, captured?.limit)
     }
 
     @Test
@@ -156,6 +171,28 @@ class SessionMessagePaginationTest {
         }
 
         assertEquals(SessionTranscriptTooLargeException::class, result.exceptionOrNull()?.let { it::class })
+    }
+
+    @Test
+    fun `older history requests one earlier latest window`() = runTest {
+        var calls = 0
+        val result = loadSessionMessages(SessionMessageLoadMode.Older(100)) { request ->
+            calls++
+            assertEquals("latest", request.order)
+            assertEquals(50, request.limit)
+            assertEquals(100, request.offset)
+            Result.success(page(50, 50))
+        }.getOrThrow()
+        assertEquals(1, calls)
+        assertEquals(50, result.size)
+    }
+
+    @Test
+    fun `recent refresh keeps older rows only through exact overlap`() {
+        val previous = page(0, 100).messages
+        val recent = page(50, 60).messages
+        assertEquals((0..109).map(Int::toString), mergeRecentSessionHistory(previous, recent).map { it.id })
+        assertEquals(recent, mergeRecentSessionHistory(page(200, 10).messages, recent))
     }
 
     private fun page(

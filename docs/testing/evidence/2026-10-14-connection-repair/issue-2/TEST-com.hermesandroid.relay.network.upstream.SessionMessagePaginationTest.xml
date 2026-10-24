@@ -1,0 +1,11 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest" tests="8" skipped="0" failures="0" errors="0" timestamp="2026-10-14T10:12:45.487Z" time="0.018">
+  <testcase name="cancellation is never converted to an empty transcript" classname="com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest" time="0.003" />
+  <testcase name="complete history pages oldest first without gaps" classname="com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest" time="0.004" />
+  <testcase name="latest mode makes exactly one bounded latest request" classname="com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest" time="0.002" />
+  <testcase name="legacy envelope is accepted as one complete response" classname="com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest" time="0.002" />
+  <testcase name="exact 500 requests one terminal page and returns no duplicates" classname="com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest" time="0.002" />
+  <testcase name="payload safety bound fails clearly before another page" classname="com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest" time="0.002" />
+  <testcase name="recent refresh keeps older rows only through exact overlap" classname="com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest" time="0.001" />
+  <testcase name="older history requests one earlier latest window" classname="com.hermesandroid.relay.network.upstream.SessionMessagePaginationTest" time="0.002" />
+</testsuite>

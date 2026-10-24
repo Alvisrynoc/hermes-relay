@@ -219,6 +219,9 @@ class GatewayClientHarness(
     }
 
     @Volatile
+    var subagentListPayload: JsonObject = buildJsonObject { put("subagents", buildJsonArray {}) }
+
+    @Volatile
     var activeSessionListPayload: JsonObject = buildJsonObject {
         put("sessions", JsonArray(emptyList()))
     }
@@ -263,6 +266,10 @@ class GatewayClientHarness(
 
     @Volatile
     var suppressGatewayReady: Boolean = false
+    @Volatile var canonicalAuthority: Boolean = false
+    @Volatile var canonicalPrompts: JsonArray = JsonArray(emptyList())
+    @Volatile var canonicalReceiptStatus: String = "started"
+    @Volatile var canonicalClaimDuringCancel: Boolean = false
 
     private val wsListener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: okhttp3.Response) {
@@ -283,6 +290,14 @@ class GatewayClientHarness(
             val params = frame["params"] as? JsonObject ?: JsonObject(emptyMap())
             rpcLog.add(method to params)
             if (!autoRespondEnabled) return
+            if (canonicalAuthority && method == "prompt.cancel" && canonicalClaimDuringCancel) {
+                canonicalReceiptStatus = "started"
+                webSocket.send(buildJsonObject {
+                    put("jsonrpc", "2.0"); put("id", id.toLong())
+                    put("error", buildJsonObject { put("code", 4090); put("message", "stale_generation") })
+                }.toString())
+                return
+            }
             if (method in suppressAckMethods) {
                 pendingAcks.add(PendingAck(webSocket, method, id.toLong()))
                 return
@@ -330,7 +345,35 @@ class GatewayClientHarness(
                 )
                 return
             }
-            val result: JsonObject? = when (method) {
+            val canonicalResult = if (canonicalAuthority) when (method) {
+                "runtime.describe" -> buildJsonObject {
+                    put("capabilities", buildJsonArray { add(JsonPrimitive("durable-admission-v1")) })
+                }
+                "session.create", "session.resume" -> buildJsonObject {
+                    val requested = (params["session_id"] as? JsonPrimitive)?.contentOrNull ?: "live-1"
+                    put("session_id", resumeLiveSessionIds[requested] ?: requested)
+                    put("stored_session_id", resumeLiveSessionIds[requested] ?: requested)
+                    put("authority_epoch", 2); put("execution_generation", 7); put("revision", 4)
+                    put("running", recoveryRunning); put("subscription_id", "subscription-1")
+                    put("replay_epoch", "epoch-1"); put("last_sequence", 0)
+                    put("pending", JsonArray(emptyList())); put("prompts", canonicalPrompts)
+                    put("messages", JsonArray(emptyList())); put("open_requests", JsonArray(emptyList()))
+                    put("info", buildJsonObject { put("profile_name", "default"); put("lazy", true) })
+                }
+                "prompt.submit" -> buildJsonObject {
+                    put("admission_id", "admission-1"); put("status", "queued"); put("sequence", 1)
+                    put("authority_epoch", 2); put("execution_generation", JsonNull)
+                    put("ref", buildJsonObject { put("session_id", "live-1"); put("profile_id", "default") })
+                }
+                "approval.respond" -> buildJsonObject { put("status", "resolved"); put("prompt_id", "approval-1") }
+                "prompt.receipt", "prompt.cancel" -> buildJsonObject {
+                    put("status", if (method == "prompt.cancel") "terminal" else canonicalReceiptStatus); put("execution_generation", 8)
+                    put("authority_epoch", 2); put("admission_id", "admission-1")
+                    put("ref", buildJsonObject { put("session_id", "live-1") })
+                }
+                else -> null
+            } else null
+            val result: JsonObject? = canonicalResult ?: when (method) {
                 "session.create" -> buildJsonObject {
                     put("session_id", "live-1")
                     put("stored_session_id", "20260612_120000_abc123")
@@ -361,6 +404,7 @@ class GatewayClientHarness(
                 )
                 "session.list" -> sessionListPayload
                 "session.active_list" -> activeSessionListPayload
+                "subagent.list" -> subagentListPayload
                 "session.title" -> buildJsonObject { put("ok", true) }
                 "prompt.submit" -> promptSubmitPayload
                 "session.interrupt" -> buildJsonObject { put("ok", true) }
@@ -709,7 +753,7 @@ class GatewayClientHarness(
     }
 
     fun sendGatewayReady(webSocket: WebSocket) {
-        webSocket.send(eventFrame("gateway.ready", null, null))
+        webSocket.send(eventFrame("gateway.ready", if (canonicalAuthority) buildJsonObject { put("session_authority", true) } else null, null))
     }
 
     fun awaitRpc(method: String): JsonObject {
@@ -968,6 +1012,160 @@ class GatewayChatClientTest {
     }
 
     @Test
+    fun subagentRosterRequiresInitializedOwnerAndCompleteValidSnapshot() = runBlocking {
+        assertTrue(client.prewarmAwait("stored-roster"))
+        val ws = harness.awaitServerSocket()
+        assertTrue(client.listActiveSubagentIds("stored-roster").isFailure)
+        assertTrue(harness.rpcLog.none { it.first == "subagent.list" })
+        val r = Recorder()
+        client.sendTurn("stored-roster", "work", null, r.callbacks) { r.preflightFailures += it }
+        harness.awaitRpc("prompt.submit")
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "launched") }, "live-resumed"))
+        assertTrue(r.completeLatch.await(5, TimeUnit.SECONDS))
+        // Complete callbacks precede retention; a same-socket reply observes the finished frame.
+        client.listProfiles().getOrThrow()
+        harness.subagentListPayload = buildJsonObject { put("subagents", buildJsonArray {
+            add(buildJsonObject { put("subagent_id", "live"); put("status", "running") })
+            add(buildJsonObject { put("subagent_id", "ended"); put("status", "completed") })
+        }) }
+        assertEquals(setOf("live"), client.listActiveSubagentIds("stored-roster").getOrThrow())
+        harness.subagentListPayload = buildJsonObject {}
+        assertTrue(client.listActiveSubagentIds("stored-roster").isFailure)
+        harness.subagentListPayload = buildJsonObject { put("subagents", buildJsonArray { add(buildJsonObject { put("subagent_id", 17) }) }) }
+        assertTrue(client.listActiveSubagentIds("stored-roster").isFailure)
+        harness.methodNotFound += "subagent.list"
+        assertTrue(client.listActiveSubagentIds("stored-roster").isFailure)
+        harness.methodNotFound -= "subagent.list"
+        assertEquals(4, harness.rpcLog.count { it.first == "subagent.list" })
+        harness.suppressAckMethods += "subagent.list"
+        val late = async(Dispatchers.IO) { client.listActiveSubagentIds("stored-roster") }
+        val ack = harness.awaitPendingAck()
+        client.clearSession()
+        harness.releaseAck(ack, buildJsonObject { put("subagents", buildJsonArray {}) })
+        assertTrue(late.await().isFailure)
+        assertTrue(harness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
+    fun ownedApprovalAfterParentCompletionIsNotRejectedAsMissingTurn() = runBlocking {
+        val r = Recorder()
+        val events = ConcurrentLinkedQueue<GatewayBackgroundInteractionEvent>()
+        client.setSessionInteractionListener(events::add)
+        client.sendTurn(null, "delegate fixture", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitRpc("prompt.submit")
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "parent finished") }, "live-1"))
+        assertTrue(r.completeLatch.await(5, TimeUnit.SECONDS))
+        nativeRequest(ws, JsonPrimitive("post-parent"), "approval",
+            """{"session_id":"live-1","command":"echo fixture","choices":["once","deny"]}""")
+        awaitCondition { events.any { it is GatewayBackgroundInteractionEvent.Requested } }
+        val ask = (events.single() as GatewayBackgroundInteractionEvent.Requested).ask
+        assertNull(harness.serverResponses.poll(100, TimeUnit.MILLISECONDS))
+        assertTrue(client.respondAsk(ask, "invalid-choice").isFailure)
+        client.respondAsk(ask, "once").getOrThrow()
+        val response = harness.serverResponses.poll(5, TimeUnit.SECONDS) ?: error("no approval response")
+        assertEquals(JsonPrimitive("post-parent"), response["id"])
+        assertEquals(JsonPrimitive("once"), (response["result"] as JsonObject)["choice"])
+        assertTrue(client.respondAsk(ask, "once").isFailure)
+        assertEquals(1, harness.rpcLog.count { it.first == "prompt.submit" })
+        assertTrue(harness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
+    fun postTurnApprovalQueueExpiryAndForeignSocketGuards() = runBlocking {
+        val events = ConcurrentLinkedQueue<GatewayBackgroundInteractionEvent>()
+        client.setSessionInteractionListener(events::add)
+        val r = Recorder()
+        client.sendTurn(null, "delegate fixture", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitRpc("prompt.submit")
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "done") }, "live-1"))
+        assertTrue(r.completeLatch.await(5, TimeUnit.SECONDS))
+        val params = """{"session_id":"live-1","command":"echo fixture","choices":["once","deny"]}"""
+        nativeRequest(ws, JsonPrimitive(17), "approval", params)
+        nativeRequest(ws, JsonPrimitive("17"), "approval", params)
+        awaitCondition { events.count { it is GatewayBackgroundInteractionEvent.Requested } == 1 }
+        val first = (events.first() as GatewayBackgroundInteractionEvent.Requested).ask
+        ws.send(harness.eventFrame("request.cancel", buildJsonObject { put("id", 17); put("method", "approval") }, "live-1"))
+        awaitCondition { events.count { it is GatewayBackgroundInteractionEvent.Requested } == 2 }
+        assertTrue(events.any { it is GatewayBackgroundInteractionEvent.Expired && it.ask.requestId == first.requestId })
+        assertTrue(client.respondAsk(first, "once").isFailure)
+        val second = (events.last() as GatewayBackgroundInteractionEvent.Requested).ask
+        client.respondAsk(second, "deny").getOrThrow()
+        assertEquals(JsonPrimitive("17"), harness.serverResponses.poll(5, TimeUnit.SECONDS)?.get("id"))
+        nativeRequest(ws, JsonPrimitive("foreign"), "approval", params.replace("live-1", "other-live"))
+        assertEquals(-32602, (harness.serverResponses.poll(5, TimeUnit.SECONDS)?.get("error") as JsonObject)["code"]?.jsonPrimitive?.intOrNull)
+        assertEquals(2, events.count { it is GatewayBackgroundInteractionEvent.Requested })
+        nativeRequest(ws, JsonPrimitive("socket-old"), "approval", params)
+        awaitCondition { events.count { it is GatewayBackgroundInteractionEvent.Requested } == 3 }
+        val stale = (events.last() as GatewayBackgroundInteractionEvent.Requested).ask
+        ws.close(1001, "fixture socket loss")
+        awaitCondition { client.connectionState.value != GatewayConnectionState.Ready }
+        assertTrue(client.respondAsk(stale, "once").isFailure)
+        assertTrue(harness.serverResponses.isEmpty())
+        assertEquals(1, harness.rpcLog.count { it.first == "prompt.submit" })
+        assertTrue(harness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
+    fun postTurnApprovalRemainsOwnedAcrossRealUnsolicitedStart() = runBlocking {
+        val events = ConcurrentLinkedQueue<GatewayBackgroundInteractionEvent>()
+        client.setSessionInteractionListener(events::add)
+        val parent = Recorder()
+        client.sendTurn(null, "fixture parent", null, parent.callbacks) { parent.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitRpc("prompt.submit")
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "done") }, "live-1"))
+        assertTrue(parent.completeLatch.await(5, TimeUnit.SECONDS))
+        val params = """{"session_id":"live-1","command":"echo fixture","choices":["once","deny"]}"""
+        nativeRequest(ws, JsonPrimitive("child-a"), "approval", params)
+        awaitCondition { events.any { it is GatewayBackgroundInteractionEvent.Requested } }
+        val ask = (events.first() as GatewayBackgroundInteractionEvent.Requested).ask
+        val next = Recorder()
+        client.setUnsolicitedTurnProvider { GatewayInboundTurnRegistration(next.callbacks, onHandle = { true }) }
+        ws.send(harness.eventFrame("message.start", null, "live-1"))
+        awaitCondition { next.starts.get() == 1 }
+        client.respondAsk(ask, "once").getOrThrow()
+        assertEquals(JsonPrimitive("child-a"), harness.serverResponses.poll(5, TimeUnit.SECONDS)?.get("id"))
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "next done") }, "live-1"))
+        assertTrue(next.completeLatch.await(5, TimeUnit.SECONDS))
+        nativeRequest(ws, JsonPrimitive("child-b"), "approval", params)
+        awaitCondition { events.count { it is GatewayBackgroundInteractionEvent.Requested } == 2 }
+        val expiring = (events.last() as GatewayBackgroundInteractionEvent.Requested).ask
+        val later = Recorder()
+        client.setUnsolicitedTurnProvider { GatewayInboundTurnRegistration(later.callbacks, onHandle = { true }) }
+        ws.send(harness.eventFrame("message.start", null, "live-1"))
+        awaitCondition { later.starts.get() == 1 }
+        ws.send(harness.eventFrame("request.cancel", buildJsonObject { put("id", "child-b"); put("method", "approval") }, "live-1"))
+        awaitCondition { events.any { it is GatewayBackgroundInteractionEvent.Expired && it.ask.requestId == expiring.requestId } }
+        assertTrue(expiring.ownershipToken.retired.get())
+        assertTrue(client.respondAsk(expiring, "once").isFailure)
+        assertEquals(1, harness.rpcLog.count { it.first == "prompt.submit" })
+        assertTrue(harness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
+    fun postTurnApprovalCannotReplyAfterProfileOrSessionChange() = runBlocking {
+        val events = ConcurrentLinkedQueue<GatewayBackgroundInteractionEvent>()
+        client.setSessionInteractionListener(events::add)
+        val r = Recorder()
+        client.sendTurn(null, "fixture", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitRpc("prompt.submit")
+        ws.send(harness.eventFrame("message.complete", buildJsonObject { put("text", "done") }, "live-1"))
+        assertTrue(r.completeLatch.await(5, TimeUnit.SECONDS))
+        nativeRequest(ws, JsonPrimitive("profile-old"), "approval",
+            """{"session_id":"live-1","command":"echo fixture","choices":["once","deny"]}""")
+        awaitCondition { events.isNotEmpty() }
+        val ask = (events.single() as GatewayBackgroundInteractionEvent.Requested).ask
+        client.sessionProfileProvider = { "other-profile" }
+        assertTrue(client.respondAsk(ask, "once").isFailure)
+        client.clearSession()
+        assertTrue(client.respondAsk(ask, "once").isFailure)
+        assertTrue(harness.serverResponses.isEmpty())
+    }
+
+    @Test
     fun `native approval queue keeps each decision and rejects answers after session clear`() = runBlocking {
         val r = Recorder()
         client.sendTurn(null, "hi", null, r.callbacks) { r.preflightFailures += it }
@@ -1067,6 +1265,215 @@ class GatewayChatClientTest {
     private var signInRequiredMarked = false
     private var unreachableMarked = false
     private var readyMarked = false
+
+    private fun canonicalEvent(type: String, payload: JsonObject? = null, admission: String = "admission-1"): String {
+        val frame = harness.json.parseToJsonElement(harness.eventFrame(type, payload, "live-1")) as JsonObject
+        return JsonObject(frame + ("params" to JsonObject((frame["params"] as JsonObject) + mapOf(
+            "admission_id" to JsonPrimitive(admission), "authority_epoch" to JsonPrimitive(2),
+            "execution_generation" to JsonPrimitive(8),
+        )))).toString()
+    }
+
+    @Test fun `canonical authority uses negotiated creation and exact admission stream`() = runBlocking {
+        harness.canonicalAuthority = true
+        val r = Recorder()
+        client.sendTurn(null, "hi", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        val submit = harness.awaitRpc("prompt.submit")
+        assertEquals("gui", harness.awaitRpc("session.create")["source"]!!.jsonPrimitive.content)
+        assertFalse(harness.awaitRpc("session.create").containsKey("cols"))
+        assertTrue(submit["submission_id"]!!.jsonPrimitive.content.isNotBlank())
+        assertTrue(submit["clarify_batch"]!!.jsonPrimitive.booleanOrNull == true)
+        assertEquals(1, harness.rpcLog.count { it.first == "runtime.describe" })
+        ws.send(canonicalEvent("message.start", admission = "foreign-admission"))
+        ws.send(canonicalEvent("message.complete", buildJsonObject { put("status", "completed") }, "foreign-admission"))
+        ws.send(canonicalEvent("message.start"))
+        ws.send(canonicalEvent("message.delta", buildJsonObject { put("text", "owned") }))
+        awaitCondition { r.textDeltas.contains("owned") }
+        assertEquals(0, r.completions.get())
+        assertTrue(r.preflightFailures.isEmpty())
+    }
+
+    @Test fun `canonical approval carries exact prompt generation and stop uses owner fence`() = runBlocking {
+        harness.canonicalAuthority = true
+        val r = Recorder()
+        val turn = client.sendTurn(null, "hi", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitRpc("prompt.submit")
+        ws.send(canonicalEvent("message.start"))
+        ws.send(canonicalEvent("approval.request", buildJsonObject {
+            put("kind", "approval"); put("prompt_id", "approval-1"); put("execution_generation", 8)
+            put("command", "echo test"); put("choices", buildJsonArray { add(JsonPrimitive("once")); add(JsonPrimitive("deny")) })
+        }))
+        awaitCondition { r.interactions.isNotEmpty() }
+        assertEquals("approval-1", r.interactions.single().requestId)
+        assertTrue(client.respondAsk(r.interactions.single(), "once").isSuccess)
+        val reply = harness.awaitRpc("approval.respond")
+        assertEquals("approval-1", reply["prompt_id"]!!.jsonPrimitive.content)
+        assertEquals(8, reply["execution_generation"]!!.jsonPrimitive.intOrNull)
+        assertFalse(reply.containsKey("all"))
+        turn.cancel()
+        assertEquals(8, harness.awaitRpc("session.interrupt")["execution_generation"]!!.jsonPrimitive.intOrNull)
+    }
+
+    @Test fun `canonical admission ack race ignores predecessor terminal`() = runBlocking {
+        harness.canonicalAuthority = true
+        harness.suppressAckMethods += "prompt.submit"
+        val r = Recorder()
+        client.sendTurn(null, "hi", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        val ack = harness.awaitPendingAck()
+        ws.send(canonicalEvent("message.complete", buildJsonObject { put("status", "completed") }, "predecessor"))
+        ws.send(canonicalEvent("message.start"))
+        ws.send(canonicalEvent("message.delta", buildJsonObject { put("text", "queued-own") }))
+        harness.releaseAck(ack, buildJsonObject {
+            put("admission_id", "admission-1"); put("status", "started"); put("execution_generation", 8)
+            put("authority_epoch", 2); put("ref", buildJsonObject { put("session_id", "live-1") })
+        })
+        awaitCondition { r.textDeltas.contains("queued-own") }
+        assertEquals(0, r.completions.get())
+        assertEquals(1, harness.rpcLog.count { it.first == "prompt.submit" })
+    }
+
+    @Test fun `canonical stop cancels exact queued admission instead of predecessor`() = runBlocking {
+        harness.canonicalAuthority = true
+        harness.canonicalReceiptStatus = "queued"
+        val r = Recorder()
+        val turn = client.sendTurn(null, "hi", null, r.callbacks) { r.preflightFailures += it }
+        harness.awaitRpc("prompt.submit")
+        turn.cancel()
+        val cancel = harness.awaitRpc("prompt.cancel")
+        assertEquals("admission-1", cancel["admission_id"]!!.jsonPrimitive.content)
+        assertFalse(harness.rpcLog.any { it.first == "session.interrupt" })
+    }
+
+    @Test fun `canonical cancelled publication survives lost receipt and reconnect`() = runBlocking {
+        harness.canonicalAuthority = true
+        harness.canonicalReceiptStatus = "queued"
+        harness.suppressAckMethods += "prompt.submit"
+        val r = Recorder()
+        val turn = client.sendTurn(null, "hi", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitPendingAck()
+        val first = harness.awaitRpc("prompt.submit")["submission_id"]
+        turn.cancel()
+        harness.suppressAckMethods -= "prompt.submit"
+        ws.close(1001, "publication gap")
+        harness.awaitServerSocket()
+        harness.awaitRpc("prompt.cancel")
+        val submissions = harness.rpcLog.filter { it.first == "prompt.submit" }.map { it.second["submission_id"] }
+        assertTrue(submissions.size >= 2)
+        assertTrue(submissions.all { it == first })
+        assertFalse(harness.rpcLog.any { it.first == "session.interrupt" })
+    }
+
+    @Test fun `canonical queued cancel claim race interrupts only same admission generation`() = runBlocking {
+        harness.canonicalAuthority = true
+        harness.canonicalReceiptStatus = "queued"
+        harness.canonicalClaimDuringCancel = true
+        val r = Recorder()
+        val turn = client.sendTurn(null, "hi", null, r.callbacks) { r.preflightFailures += it }
+        harness.awaitRpc("prompt.submit")
+        turn.cancel()
+        assertEquals(8, harness.awaitRpc("session.interrupt")["execution_generation"]!!.jsonPrimitive.intOrNull)
+        assertTrue(harness.rpcLog.count { it.first == "prompt.receipt" } >= 2)
+    }
+
+    @Test fun `canonical cold recovery never claims later running admission`() = runBlocking {
+        harness.canonicalAuthority = true
+        harness.recoveryRunning = true
+        harness.canonicalReceiptStatus = "terminal"
+        val r = Recorder()
+        val result = client.recoverTurn("live-1", "live-1", r.callbacks,
+            canonicalSubmissionId = "old-input", canonicalAdmissionId = "old-admission").getOrThrow()
+        assertFalse(result.running)
+        assertNull(result.handle)
+        assertFalse(client.hasActiveTurn())
+        assertFalse(harness.rpcLog.any { it.first == "prompt.submit" })
+    }
+
+    @Test fun `canonical older checkpoint stays passive without attaching`() = runBlocking {
+        harness.canonicalAuthority = true
+        harness.recoveryRunning = true
+        val result = client.recoverTurn("live-1", "live-1", Recorder().callbacks).getOrThrow()
+        assertNull(result.handle)
+        assertFalse(harness.rpcLog.any { it.first in setOf("session.resume", "session.activate", "prompt.submit") })
+    }
+
+    @Test fun `canonical rewind lost receipt resumes same mutation then admits edit once`() = runBlocking {
+        harness.canonicalAuthority = true
+        harness.recoveryRunning = true
+        harness.suppressAckMethods += "session.mutate"
+        val r = Recorder()
+        client.sendTurn(null, "edited", null, r.callbacks, truncateBeforeRowId = 17,
+            onPreflightFailure = { r.preflightFailures += it })
+        val ws = harness.awaitServerSocket()
+        harness.awaitPendingAck()
+        val original = harness.awaitRpc("session.mutate")["request_id"]
+        harness.suppressAckMethods -= "session.mutate"
+        ws.close(1001, "rewind receipt gap")
+        harness.awaitServerSocket()
+        val submit = harness.awaitRpc("prompt.submit")
+        assertEquals("edited", submit["text"]!!.jsonPrimitive.content)
+        assertFalse(submit.containsKey("confirm_truncate"))
+        val writes = harness.rpcLog.filter { it.first == "session.mutate" }.map { it.second["request_id"] }
+        assertTrue(writes.size >= 2)
+        assertTrue(writes.all { it == original })
+        assertEquals(1, harness.rpcLog.count { it.first == "prompt.submit" })
+    }
+
+    @Test fun `canonical cold unconfirmed edit requires explicit recovery instead of new rewind`() = runBlocking {
+        harness.canonicalAuthority = true
+        val result = client.recoverTurn("live-1", "live-1", Recorder().callbacks,
+            canonicalSubmissionId = "lost-edit", canonicalEditUnconfirmed = true)
+        assertEquals(4098, (result.exceptionOrNull() as? GatewayRpcException)?.code)
+        assertFalse(harness.rpcLog.any { it.first in setOf("session.mutate", "prompt.submit") })
+    }
+
+    @Test fun `canonical queued steering never redirects predecessor`() = runBlocking {
+        harness.canonicalAuthority = true
+        harness.canonicalReceiptStatus = "queued"
+        val r = Recorder()
+        client.sendTurn(null, "hi", null, r.callbacks) { r.preflightFailures += it }
+        harness.awaitRpc("prompt.submit")
+        assertEquals(SteerResult.Failed, client.steer("change this"))
+        assertFalse(harness.rpcLog.any { it.first in setOf("session.redirect", "session.steer") })
+    }
+
+    @Test fun `canonical stop while socket is down retains intent until ready`() = runBlocking {
+        harness.canonicalAuthority = true
+        harness.canonicalReceiptStatus = "queued"
+        val r = Recorder()
+        val turn = client.sendTurn(null, "hi", null, r.callbacks) { r.preflightFailures += it }
+        val ws = harness.awaitServerSocket()
+        harness.awaitRpc("prompt.submit")
+        harness.suppressGatewayReady = true
+        ws.close(1001, "offline before Stop")
+        val replacement = harness.awaitServerSocket()
+        turn.cancel()
+        assertEquals(true, client.currentAdmissionIdentity("live-1")?.cancelRequested)
+        harness.sendGatewayReady(replacement)
+        harness.awaitRpc("prompt.cancel")
+        assertFalse(harness.rpcLog.any { it.first == "session.interrupt" })
+    }
+
+    @Test fun `canonical compression alias keeps cancellation identity and resolves owner before control`() = runBlocking {
+        harness.canonicalAuthority = true
+        harness.canonicalReceiptStatus = "queued"
+        harness.resumeLiveSessionIds["physical-segment"] = "live-1"
+        harness.suppressAckMethods += "prompt.cancel"
+        val r = Recorder()
+        val turn = client.sendTurn("physical-segment", "hi", null, r.callbacks) { r.preflightFailures += it }
+        harness.awaitRpc("prompt.submit")
+        turn.cancel()
+        val pending = harness.awaitPendingAck()
+        assertEquals(true, client.currentAdmissionIdentity("physical-segment")?.cancelRequested)
+        harness.suppressAckMethods -= "prompt.cancel"
+        harness.releaseAck(pending, buildJsonObject { put("status", "terminal") })
+        val result = client.recoverCancelledAdmission("physical-segment", "saved-input", "admission-1")
+        assertTrue(result.isSuccess)
+        assertTrue(harness.rpcLog.filter { it.first == "prompt.cancel" }.all { it.second["session_id"] == JsonPrimitive("live-1") })
+    }
 
     private class Recorder {
         val starts = AtomicInteger(0)
@@ -2430,6 +2837,44 @@ class GatewayChatClientTest {
     }
 
     @Test
+    fun `active snapshot child count is optional and nonnegative`() = runBlocking {
+        fun payload(count: Int?) = buildJsonObject {
+            put("sessions", JsonArray(listOf(buildJsonObject {
+                put("id", "desktop-runtime")
+                put("session_key", "stored-desktop")
+                put("status", "working")
+                put("last_active", 1.0)
+                count?.let { put("active_subagent_count", it) }
+            })))
+        }
+        for ((wire, expected) in listOf(null to 0, -1 to 0, 3 to 3)) {
+            harness.activeSessionListPayload = payload(wire)
+            val result = client.listActiveSessions() as GatewayActiveSessionsResult.Success
+            assertEquals(expected, result.sessions.single().activeSubagentCount)
+        }
+    }
+
+    @Test
+    fun `active snapshot accepts optional sanitized pending identities`() = runBlocking {
+        harness.activeSessionListPayload = buildJsonObject {
+            put("sessions", JsonArray(listOf(buildJsonObject {
+                put("id", "desktop-runtime")
+                put("session_key", "stored-desktop")
+                put("profile", "operator")
+                put("status", "waiting")
+                put("last_active", 1.0)
+                put("pending_inputs", JsonArray(listOf(buildJsonObject {
+                    put("id", "input-1"); put("method", "clarify")
+                })))
+            })))
+        }
+        val result = client.listActiveSessions() as GatewayActiveSessionsResult.Success
+        assertEquals("operator", result.sessions.single().profile)
+        assertEquals(listOf(GatewayPendingInput("input-1", "clarify")), result.sessions.single().pendingInputs)
+        assertTrue(harness.rpcLog.none { it.first in setOf("session.resume", "session.activate", "prompt.submit") })
+    }
+
+    @Test
     fun `existing session id is resumed not recreated`() {
         val r = Recorder()
         client.sendTurn("20260101_010101_aaaaaa", "again", null, r.callbacks) {
@@ -2438,6 +2883,8 @@ class GatewayChatClientTest {
         harness.awaitRpc("prompt.submit")
 
         val resume = harness.awaitRpc("session.resume")
+        assertEquals(true, (resume["omit_messages"] as? JsonPrimitive)?.booleanOrNull)
+        assertEquals(true, (resume["defer_history"] as? JsonPrimitive)?.booleanOrNull)
         assertEquals("webui", (resume["source"] as? JsonPrimitive)?.contentOrNull)
         assertEquals(
             "20260101_010101_aaaaaa",
@@ -2728,6 +3175,7 @@ class GatewayChatClientTest {
         val ws2 = harness.awaitServerSocket()
         assertTrue("reconnect must mint a fresh ticket", harness.ticketMints.get() >= 2)
         val activate = harness.awaitRpc("session.activate")
+        assertEquals(true, (activate["omit_messages"] as? JsonPrimitive)?.booleanOrNull)
         assertEquals("live-1", (activate["session_id"] as? JsonPrimitive)?.contentOrNull)
         assertEquals(true, (activate["omit_messages"] as? JsonPrimitive)?.booleanOrNull)
 
@@ -4963,6 +5411,8 @@ class GatewayChatClientTest {
         assertNotNull(recovery.handle)
         assertEquals(1, harness.rpcLog.count { it.first == "session.activate" })
         assertEquals(0, harness.rpcLog.count { it.first == "session.resume" })
+        val activate = harness.awaitRpc("session.activate")
+        assertEquals(true, (activate["omit_messages"] as? JsonPrimitive)?.booleanOrNull)
 
         val serverWs = harness.awaitServerSocket()
         serverWs.send(
@@ -5016,6 +5466,78 @@ class GatewayChatClientTest {
     }
 
     @Test
+    fun `input review admits replay before callbacks and stays desktop owned`() = runBlocking {
+        harness.recoveryRunning = true
+        harness.recoveryOpenRequests = buildJsonArray {
+            add(buildJsonObject {
+                put("id", "srq-review"); put("method", "clarify")
+                put("params", buildJsonObject { put("session_id", "live-review"); put("question", "Continue?") })
+            })
+        }
+        val recorder = Recorder()
+        var admitted = false
+        val recovery = client.recoverTurn("stored-42", "live-review", recorder.callbacks,
+            androidOwned = false, onHandle = { assertTrue(recorder.interactions.isEmpty()); admitted = true; true }).getOrThrow()
+        assertTrue(admitted)
+        awaitCondition { recorder.interactions.size == 1 }
+        assertEquals("jsonrpc:\"srq-review\"", recorder.interactions.single().requestId)
+        assertNotNull(recovery.handle)
+        client.shutdown()
+        assertEquals(0, harness.rpcLog.count { it.first == "session.interrupt" || it.first == "prompt.submit" })
+    }
+
+    @Test
+    fun `input review rejects stale admission without delivering or interrupting`() = runBlocking {
+        harness.recoveryRunning = true
+        val recorder = Recorder()
+        val recovery = client.recoverTurn("stored-42", "live-review", recorder.callbacks,
+            androidOwned = false, onHandle = { false })
+        assertTrue(recovery.isFailure)
+        assertTrue(recorder.interactions.isEmpty())
+        assertEquals(0, harness.rpcLog.count { it.first == "session.interrupt" || it.first == "prompt.submit" })
+    }
+
+    @Test
+    fun `rejected input review drops buffered asks without replying in the next owner`() = runBlocking {
+        harness.suppressAckMethods += "session.resume"
+        val old = Recorder()
+        val review = scope.async {
+            client.recoverTurn("desktop-old", null, old.callbacks, androidOwned = false, onHandle = { false })
+        }
+        val ack = harness.awaitPendingAck()
+        val socket = harness.awaitServerSocket()
+        val frame = buildJsonObject {
+            put("jsonrpc", "2.0")
+            put("id", "srq-old-review"); put("method", "clarify")
+            put("params", buildJsonObject { put("session_id", "live-old"); put("question", "Continue?") })
+        }
+        socket.send(frame.toString())
+        harness.releaseAck(ack, buildJsonObject {
+            put("session_id", "live-old"); put("running", true)
+            put("info", buildJsonObject { put("profile_name", "default") })
+            put("open_requests", buildJsonArray { add(frame) })
+        })
+        assertTrue(review.await().isFailure)
+        socket.send(frame.toString())
+        harness.suppressAckMethods -= "session.resume"
+        harness.recoveryRunning = true
+        val next = Recorder()
+        val nextRecovery = client.recoverTurn("desktop-next", null, next.callbacks).getOrThrow()
+        socket.send(frame.toString())
+        client.listActiveSessions()
+        assertTrue(old.interactions.isEmpty())
+        assertTrue(next.interactions.isEmpty())
+        assertTrue(harness.serverResponses.isEmpty())
+        assertEquals(0, harness.rpcLog.count { it.first == "session.interrupt" || it.first == "prompt.submit" })
+        nextRecovery.handle!!.detach()
+        harness.recoveryOpenRequests = buildJsonArray { add(frame) }
+        val retry = Recorder()
+        client.recoverTurn("desktop-old", "live-old", retry.callbacks, androidOwned = false,
+            onHandle = { true }).getOrThrow()
+        awaitCondition { retry.interactions.size == 1 }
+    }
+
+    @Test
     fun `recoverTurn falls back to durable resume when activate is unsupported`() {
         harness.methodNotFound += "session.activate"
         harness.recoveryRunning = true
@@ -5034,6 +5556,9 @@ class GatewayChatClientTest {
         assertNotNull(recovery.handle)
         assertEquals(1, harness.rpcLog.count { it.first == "session.activate" })
         assertEquals(1, harness.rpcLog.count { it.first == "session.resume" })
+        val resume = harness.awaitRpc("session.resume")
+        assertEquals(true, (resume["omit_messages"] as? JsonPrimitive)?.booleanOrNull)
+        assertEquals(true, (resume["defer_history"] as? JsonPrimitive)?.booleanOrNull)
 
         val serverWs = harness.awaitServerSocket()
         serverWs.send(

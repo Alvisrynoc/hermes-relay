@@ -1,0 +1,52 @@
+{
+  "name": "subagent_roster_reconcile",
+  "live_session_id": "fixture-live-roster",
+  "stored_session_id": "fixture-stored-roster",
+  "contract_requirements": [
+    "gateway.subagent_roster",
+    "gateway.message_complete"
+  ],
+  "subagent_roster": [
+    {
+      "subagent_id": "still-running",
+      "status": "running"
+    }
+  ],
+  "turns": [
+    {
+      "steps": [
+        {
+          "op": "event",
+          "type": "message.start"
+        },
+        {
+          "op": "event",
+          "type": "subagent.start",
+          "payload": {
+            "subagent_id": "ended-child",
+            "goal": "Synthetic work"
+          }
+        },
+        {
+          "op": "event",
+          "type": "subagent.start",
+          "payload": {
+            "subagent_id": "still-running",
+            "goal": "Synthetic work"
+          }
+        },
+        {
+          "op": "event",
+          "type": "message.complete",
+          "payload": {
+            "text": "Launched"
+          }
+        },
+        {
+          "op": "set_running",
+          "value": false
+        }
+      ]
+    }
+  ]
+}

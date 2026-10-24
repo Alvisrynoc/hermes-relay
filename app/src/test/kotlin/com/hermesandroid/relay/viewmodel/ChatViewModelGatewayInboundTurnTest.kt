@@ -3024,6 +3024,34 @@ class ChatViewModelGatewayInboundTurnTest {
     }
 
     @Test
+    fun authoritativeRosterRemovesOnlyMissingIdentifiedChildCardsAfterParentCompletion() {
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        viewModel.sendMessage("Delegate synthetic work")
+        gatewayHarness.awaitRpc("prompt.submit")
+        serverWs.send(gatewayHarness.eventFrame("message.start", null, "live-resumed"))
+        listOf("ended-child", "still-running").forEach { child ->
+            serverWs.send(gatewayHarness.eventFrame("subagent.start", buildJsonObject {
+                put("subagent_id", child); put("goal", "Synthetic work")
+            }, "live-resumed"))
+        }
+        awaitCondition { viewModel.subagentActivities.value.size == 2 }
+        serverWs.send(gatewayHarness.eventFrame("message.complete", buildJsonObject { put("text", "Launched") }, "live-resumed"))
+        awaitCondition { !handler.isStreaming.value }
+        assertEquals(2, viewModel.subagentActivities.value.count { !it.isTerminal })
+        gatewayHarness.subagentListPayload = buildJsonObject {
+            put("subagents", buildJsonArray { add(buildJsonObject { put("subagent_id", "still-running"); put("status", "running") }) })
+        }
+        viewModel.setChatVisible(true)
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.subagentActivities.value.map { it.subagentId } == listOf("still-running") }
+        assertFalse(viewModel.subagentActivities.value.single().isTerminal)
+        assertFalse(handler.isStreaming.value)
+        assertEquals(1, gatewayHarness.rpcLog.count { it.first == "prompt.submit" })
+        assertTrue(gatewayHarness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
     fun detachedChildRemainsPreviewableAfterParentCompletesAndAcceptsLateProgress() {
         viewModel.sendMessage("Delegate work")
         gatewayHarness.awaitRpc("prompt.submit")
@@ -4554,6 +4582,295 @@ class ChatViewModelGatewayInboundTurnTest {
         assertEquals(0, gatewayHarness.rpcLog.count { it.first == "session.activate" })
         assertEquals(0, gatewayHarness.rpcLog.count { it.first == "session.interrupt" })
         assertFalse(handler.isStreaming.value)
+    }
+
+    @Test
+    fun desktopPendingSnapshotAlertsWithoutClaimingOrAnsweringRequest() {
+        val app = org.robolectric.RuntimeEnvironment.getApplication()
+        shadowOf(app).grantPermissions(android.Manifest.permission.POST_NOTIFICATIONS)
+        val notifications = app.getSystemService(android.app.NotificationManager::class.java)
+        notifications.cancelAll()
+        @Suppress("UNCHECKED_CAST")
+        val foreground = com.hermesandroid.relay.util.AppForegroundTracker::class.java
+            .getDeclaredField("_isForeground").apply { isAccessible = true }
+            .get(null) as kotlinx.coroutines.flow.MutableStateFlow<Boolean>
+        val previousForeground = foreground.value
+        try {
+            foreground.value = true
+            viewModel.initializeGatewayOnly(app)
+            viewModel.setChatTurnCheckpointStore(MemoryCheckpointStore())
+            viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", "observer"), STORED_SESSION_ID)
+            awaitCondition { !viewModel.isLoadingHistory.value }
+            viewModel.notifyOnTurnComplete = true
+            gatewayClient.setKeepAliveInBackground(true)
+            val baseline = gatewayHarness.rpcLog.count { it.first in setOf("session.resume", "session.activate", "prompt.submit") }
+            gatewayHarness.activeSessionListPayload = buildJsonObject {
+                put("sessions", buildJsonArray {
+                    add(buildJsonObject {
+                        put("id", "desktop-runtime")
+                        put("session_key", STORED_SESSION_ID)
+                        put("profile", "observer")
+                        put("status", "waiting")
+                        put("last_active", 1.0)
+                        put("pending_inputs", buildJsonArray {
+                            add(buildJsonObject { put("id", "request-1"); put("method", "approval") })
+                        })
+                    })
+                })
+            }
+            foreground.value = false
+            viewModel.setChatVisible(false)
+            viewModel.requestSessionActivityRefresh()
+            awaitCondition { notifications.activeNotifications.size == 1 }
+            assertNull(viewModel.pendingAsk.value)
+            assertEquals(baseline, gatewayHarness.rpcLog.count { it.first in setOf("session.resume", "session.activate", "prompt.submit") })
+            viewModel.requestSessionActivityRefresh()
+            shadowOf(Looper.getMainLooper()).idle()
+            assertEquals(1, notifications.activeNotifications.size)
+            gatewayHarness.activeSessionListPayload = buildJsonObject { put("sessions", buildJsonArray {}) }
+            viewModel.requestSessionActivityRefresh()
+            awaitCondition { notifications.activeNotifications.isEmpty() }
+        } finally {
+            foreground.value = previousForeground
+            gatewayClient.setKeepAliveInBackground(false)
+            notifications.cancelAll()
+        }
+    }
+
+    @Test
+    fun idleParentWithObservedChildrenPollsCompletionAtBusyCadence() {
+        // The shared harness otherwise supplies a running process, a separate busy overlay.
+        gatewayHarness.methodNotFound += "process.list"
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        fun snapshot(count: Int) = buildJsonObject {
+            put("sessions", buildJsonArray { add(buildJsonObject {
+                put("id", "live-resumed"); put("session_key", STORED_SESSION_ID)
+                put("status", "idle"); put("last_active", 1.0)
+                put("active_subagent_count", count)
+            }) })
+        }
+        gatewayHarness.activeSessionListPayload = snapshot(3)
+        viewModel.setChatVisible(true)
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 3 }
+        gatewayHarness.activeSessionListPayload = snapshot(0)
+        // Do not request a refresh: owned children must retain the existing busy poll cadence.
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        while (System.nanoTime() < deadline && viewModel.observedSubagentCount.value != 0) {
+            shadowOf(Looper.getMainLooper()).idleFor(25, TimeUnit.MILLISECONDS)
+            Thread.sleep(25)
+        }
+        assertEquals("idle parent left child completion on the 30-second idle poll", 0,
+            viewModel.observedSubagentCount.value)
+        assertFalse(handler.isStreaming.value)
+    }
+
+    @Test
+    fun observedSubagentCountStaysWithExactOwnerAndClearsWhenUnavailable() {
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        fun snapshot(session: String) = buildJsonObject {
+            put("sessions", buildJsonArray {
+                add(buildJsonObject {
+                    put("id", if (session == STORED_SESSION_ID) "live-resumed" else "foreign-runtime")
+                    put("session_key", session); put("status", "working"); put("last_active", 1.0)
+                    put("active_subagent_count", 3)
+                })
+            })
+        }
+        gatewayHarness.activeSessionListPayload = snapshot(STORED_SESSION_ID)
+        viewModel.setChatVisible(true)
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 3 }
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.Working,
+            viewModel.currentSessionActivity(viewModel.sessionActivities.value)?.phase())
+        // Same profile, another stored chat, before any new snapshot arrives.
+        handler.setSessionId("same-profile-other-chat")
+        assertEquals(0, viewModel.currentSessionSubagentCount())
+        assertNull(viewModel.currentSessionActivity(viewModel.sessionActivities.value))
+        handler.setSessionId(STORED_SESSION_ID)
+        assertEquals(3, viewModel.currentSessionSubagentCount())
+        gatewayHarness.activeSessionListPayload = snapshot("other-conversation")
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 0 }
+        gatewayHarness.activeSessionListPayload = snapshot(STORED_SESSION_ID)
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 3 }
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-b", null), "other-conversation")
+        assertEquals(0, viewModel.observedSubagentCount.value)
+        assertTrue(viewModel.currentSessionActivity(viewModel.sessionActivities.value)?.owner?.connectionId != "connection-a")
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 3 }
+        gatewayHarness.methodNotFound += "session.active_list"
+        viewModel.requestSessionActivityRefresh()
+        awaitCondition { viewModel.observedSubagentCount.value == 0 }
+        awaitCondition { viewModel.currentSessionActivity(viewModel.sessionActivities.value)?.freshness ==
+            com.hermesandroid.relay.data.SessionActivityFreshness.Unavailable }
+    }
+
+    @Test
+    fun inputNotificationReviewReplaysCardWithoutInventingPhoneTurn() {
+        val checkpointStore = MemoryCheckpointStore()
+        viewModel.setChatTurnCheckpointStore(checkpointStore)
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        gatewayHarness.recoveryRunning = true
+        gatewayHarness.recoveryOpenRequests = buildJsonArray {
+            add(buildJsonObject {
+                put("id", "srq-review"); put("method", "clarify")
+                put("params", buildJsonObject { put("session_id", "live-resumed"); put("question", "Continue?") })
+            })
+        }
+        val sends = gatewayHarness.rpcLog.count { it.first == "prompt.submit" }
+        runBlocking {
+            viewModel.reviewPendingInput(com.hermesandroid.relay.notifications.ChatNotificationTarget(
+                "connection-a", null, STORED_SESSION_ID))
+        }
+        awaitCondition { viewModel.pendingAsk.value != null }
+        assertEquals("jsonrpc:\"srq-review\"", viewModel.pendingAsk.value!!.ask.requestId)
+        assertNull(checkpointStore.checkpoint)
+        assertEquals(sends, gatewayHarness.rpcLog.count { it.first == "prompt.submit" })
+        viewModel.updateGatewayClient(null)
+        assertEquals(0, gatewayHarness.rpcLog.count { it.first == "session.interrupt" })
+    }
+
+    @Test
+    fun inputNotificationReviewRejectsWrongOwnerAndSupervision() {
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        val methods = setOf("session.activate", "session.resume", "prompt.submit")
+        val before = gatewayHarness.rpcLog.count { it.first in methods }
+        runBlocking {
+            viewModel.reviewPendingInput(com.hermesandroid.relay.notifications.ChatNotificationTarget(
+                "other-connection", null, STORED_SESSION_ID))
+        }
+        viewModel.updateSupervisedModePolicy(com.hermesandroid.relay.data.SupervisedModePolicy(enabled = true))
+        runBlocking {
+            viewModel.reviewPendingInput(com.hermesandroid.relay.notifications.ChatNotificationTarget(
+                "connection-a", null, STORED_SESSION_ID))
+        }
+        viewModel.updateSupervisedModePolicy(com.hermesandroid.relay.data.SupervisedModePolicy())
+        viewModel.setLockedProfileNameProvider { "locked" }
+        runBlocking {
+            viewModel.reviewPendingInput(com.hermesandroid.relay.notifications.ChatNotificationTarget(
+                "connection-a", null, STORED_SESSION_ID))
+        }
+        assertEquals(before, gatewayHarness.rpcLog.count { it.first in methods })
+        assertNull(viewModel.pendingAsk.value)
+    }
+
+    @Test
+    fun cachedBackgroundInputCannotReconfirmAfterWorkingButFreshEventsRemainTrusted() {
+        val context = AgentDisplay.profileContextKey("connection-a", null)
+        viewModel.switchProfileContext(context, STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        viewModel.setChatVisible(false)
+        val owner = com.hermesandroid.relay.data.SessionActivityOwner.of(
+            "connection-a", AgentDisplay.profileSessionKey(null), STORED_SESSION_ID)
+        @Suppress("UNCHECKED_CAST")
+        val records = ChatViewModel::class.java.getDeclaredField("sessionActivityRegistry")
+            .apply { isAccessible = true }.get(viewModel) as kotlinx.coroutines.flow.MutableStateFlow<com.hermesandroid.relay.data.SessionActivityRegistry>
+        val generation = (ChatViewModel::class.java.getDeclaredField("sessionActivityGeneration")
+            .apply { isAccessible = true }.get(viewModel) as java.util.concurrent.atomic.AtomicLong).get()
+        val key = ChatViewModel::class.java.declaredClasses.single { it.simpleName == "TurnCheckpointKey" }
+            .getDeclaredConstructor(String::class.java, String::class.java).apply { isAccessible = true }
+            .newInstance(context, STORED_SESSION_ID)
+        @Suppress("UNCHECKED_CAST")
+        val checkpoints = ChatViewModel::class.java.getDeclaredField("backgroundTurnCheckpoints")
+            .apply { isAccessible = true }.get(viewModel) as MutableMap<Any, ChatTurnCheckpoint>
+        val now = System.currentTimeMillis()
+        checkpoints[key] = ChatTurnCheckpoint(contextKey = context, sessionId = STORED_SESSION_ID,
+            liveSessionId = "live-resumed", transport = "gateway",
+            user = ChatTurnUserCheckpoint("synthetic-user", "synthetic", now),
+            assistant = ChatTurnAssistantCheckpoint("synthetic-assistant", timestamp = now),
+            priorUserMessageCount = 0, baselineAssistantCount = 0, startedAt = now, updatedAt = now)
+        @Suppress("UNCHECKED_CAST")
+        val listener = GatewayChatClient::class.java.getDeclaredField("backgroundInteractionListener")
+            .apply { isAccessible = true }.get(gatewayClient) as (com.hermesandroid.relay.network.upstream.GatewayBackgroundInteractionEvent) -> Unit
+        val ask = com.hermesandroid.relay.network.upstream.GatewayAsk(
+            com.hermesandroid.relay.network.upstream.GatewayAsk.Kind.APPROVAL, "synthetic-input", "synthetic", timeoutSeconds = 60)
+        listener(com.hermesandroid.relay.network.upstream.GatewayBackgroundInteractionEvent.Requested(STORED_SESSION_ID, null, ask))
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.NeedsInput, records.value.record(owner)?.phase())
+        records.value = records.value.reduce(com.hermesandroid.relay.data.SessionActivityUpdate.ActiveList(
+            scope = com.hermesandroid.relay.data.SessionActivityScope.of("connection-a", owner.profile),
+            runtimes = listOf(com.hermesandroid.relay.data.SessionLiveRuntime(owner, "live-resumed",
+                com.hermesandroid.relay.data.SessionLiveStatus.Working)), isCompleteForScope = true,
+            generation = generation, observedAtMillis = System.currentTimeMillis() + 100))
+        repeat(2) { ChatViewModel::class.java.getDeclaredMethod("publishBackgroundSessionActivity")
+            .apply { isAccessible = true }.invoke(viewModel) }
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.Working, records.value.record(owner)?.phase())
+        val fresh = ask.copy(requestId = "fresh-input")
+        listener(com.hermesandroid.relay.network.upstream.GatewayBackgroundInteractionEvent.Requested(STORED_SESSION_ID, null, fresh))
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.NeedsInput, records.value.record(owner)?.phase())
+        val freshPending = records.value.record(owner)?.pendingInputs
+        listener(com.hermesandroid.relay.network.upstream.GatewayBackgroundInteractionEvent.Expired(STORED_SESSION_ID, null, ask))
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.NeedsInput, records.value.record(owner)?.phase())
+        assertEquals(freshPending, records.value.record(owner)?.pendingInputs)
+        listener(com.hermesandroid.relay.network.upstream.GatewayBackgroundInteractionEvent.Expired(STORED_SESSION_ID, null, fresh))
+        assertEquals(com.hermesandroid.relay.data.SessionActivityPhase.Working, records.value.record(owner)?.phase())
+    }
+
+    @Test
+    fun ownedApprovalAfterParentTurnRendersAndRepliesWithoutStartingAnotherTurn() {
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        viewModel.sendMessage("Delegate synthetic child")
+        gatewayHarness.awaitRpc("prompt.submit")
+        serverWs.send(gatewayHarness.eventFrame("message.complete", buildJsonObject { put("text", "Parent finished") }, "live-resumed"))
+        awaitCondition { !handler.isStreaming.value }
+        serverWs.send(buildJsonObject {
+            put("jsonrpc", "2.0"); put("id", "post-parent-card"); put("method", "approval")
+            put("params", buildJsonObject {
+                put("session_id", "live-resumed"); put("command", "echo fixture")
+                put("choices", buildJsonArray { add(JsonPrimitive("once")); add(JsonPrimitive("deny")) })
+            })
+        }.toString())
+        awaitCondition { viewModel.pendingAsk.value != null }
+        val pending = requireNotNull(viewModel.pendingAsk.value)
+        assertFalse(handler.isStreaming.value)
+        assertTrue(handler.messages.value.any { message -> message.cards.any { it.id == pending.cardKey } })
+        // A real child-triggered turn may start while this independent request waits.
+        serverWs.send(gatewayHarness.eventFrame("message.start", null, "live-resumed"))
+        awaitCondition { handler.isStreaming.value }
+        assertEquals(pending, viewModel.pendingAsk.value)
+        assertTrue(handler.messages.value.any { message -> message.cards.any { it.id == pending.cardKey } })
+        viewModel.answerAsk(pending.messageId, pending.cardKey, "once")
+        val response = gatewayHarness.serverResponses.poll(5, TimeUnit.SECONDS) ?: error("missing approval reply")
+        assertEquals(JsonPrimitive("post-parent-card"), response["id"])
+        assertEquals("once", (response["result"] as kotlinx.serialization.json.JsonObject)["choice"]?.toString()?.trim('"'))
+        awaitCondition { viewModel.pendingAsk.value == null }
+        assertTrue(handler.isStreaming.value)
+        serverWs.send(gatewayHarness.eventFrame("message.complete", buildJsonObject { put("text", "Child update") }, "live-resumed"))
+        awaitCondition { !handler.isStreaming.value }
+        assertEquals(1, gatewayHarness.rpcLog.count { it.first == "prompt.submit" })
+        assertTrue(gatewayHarness.rpcLog.none { it.first == "session.interrupt" })
+    }
+
+    @Test
+    fun passiveHistoryRefreshShowsLoadingAndKeepsTranscriptOnFailure() {
+        val started = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        viewModel.setChatTurnCheckpointStore(MemoryCheckpointStore())
+        viewModel.switchProfileContext(AgentDisplay.profileContextKey("connection-a", null), STORED_SESSION_ID)
+        awaitCondition { !viewModel.isLoadingHistory.value }
+        handler.loadMessageHistory(persistedAnswerHistory())
+        val previous = handler.messages.value
+        viewModel.setProfileMessageLoader {
+            started.complete(Unit)
+            release.await()
+            Result.failure(IllegalStateException("History connection lost"))
+        }
+        viewModel.setChatVisible(true)
+        awaitCondition { started.isCompleted }
+        assertTrue(viewModel.isRefreshingHistory.value)
+        assertEquals(previous, handler.messages.value)
+        release.complete(Unit)
+        awaitCondition { !viewModel.isRefreshingHistory.value && viewModel.chatFailure.value != null }
+        assertEquals(previous, handler.messages.value)
+        assertEquals("History connection lost", viewModel.chatFailure.value?.rawError)
     }
 
     @Test

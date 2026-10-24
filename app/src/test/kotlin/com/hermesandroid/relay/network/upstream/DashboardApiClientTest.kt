@@ -1575,7 +1575,7 @@ class DashboardApiClientTest {
         val url = request.requestUrl!!
         assertEquals("/api/sessions/sess-a/messages", url.encodedPath)
         assertEquals("mizu", url.queryParameter("profile"))
-        assertEquals("500", url.queryParameter("limit"))
+        assertEquals("50", url.queryParameter("limit"))
         assertEquals("0", url.queryParameter("offset"))
         assertEquals("latest", url.queryParameter("order"))
         assertEquals("true", url.queryParameter("include_compacted"))

@@ -32,6 +32,7 @@ class Scenario:
     active_list_snapshots: tuple[tuple[dict[str, Any], ...], ...]
     session_initialization_error: str | None = None
     dashboard_setup: bool = False
+    subagent_roster: tuple[dict[str, Any], ...] | None = None
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Scenario":
@@ -139,6 +140,12 @@ class Scenario:
                     )
                 validated_rows.append(dict(row))
             validated_snapshots.append(tuple(validated_rows))
+        roster = raw.get("subagent_roster")
+        if roster is not None and (not isinstance(roster, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("subagent_id"), str) or not row["subagent_id"]
+            for row in roster
+        )):
+            raise ScenarioError("subagent_roster must be an array of identified children")
         return cls(
             name=str(raw["name"]),
             live_session_id=str(raw["live_session_id"]),
@@ -151,6 +158,7 @@ class Scenario:
             active_list_snapshots=tuple(validated_snapshots),
             session_initialization_error=initialization_error,
             dashboard_setup=raw.get("dashboard_setup", False),
+            subagent_roster=tuple(dict(row) for row in roster) if roster is not None else None,
         )
 
 

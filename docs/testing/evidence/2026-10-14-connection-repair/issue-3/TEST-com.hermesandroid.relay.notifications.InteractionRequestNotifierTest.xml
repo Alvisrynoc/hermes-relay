@@ -1,0 +1,13 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" tests="10" skipped="0" failures="0" errors="0" timestamp="2026-10-14T10:26:26.674Z" time="3.804">
+  <testcase name="copyAndPublicVersionNeverExposePromptCommandOrSecretMetadata" classname="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" time="2.658" />
+  <testcase name="resolvedOrExpiredRequestCancelsOnlyItsStableSlot" classname="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" time="0.06" />
+  <testcase name="missingAndroidPermissionSkipsPosting" classname="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" time="0.033" />
+  <testcase name="backgroundAndSettingAndPermissionGatesAreExplicit" classname="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" time="0.029" />
+  <testcase name="appRelaunchCleanupRemovesOnlyInteractionChannelNotifications" classname="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" time="0.03" />
+  <testcase name="newInputChannelEnablesVibration" classname="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" time="0.03" />
+  <testcase name="ownedInputTapRequestsReviewWhileOrdinaryConversationTapStaysPassive" classname="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" time="0.032" />
+  <testcase name="existingInputChannelKeepsUserVibrationPreference" classname="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" time="0.03" />
+  <testcase name="requestReplayReplacesOneNotificationAndDeepLinksToExactSession" classname="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" time="0.039" />
+  <testcase name="sameStoredSessionInTwoProfilesKeepsIndependentNotificationSlots" classname="com.hermesandroid.relay.notifications.InteractionRequestNotifierTest" time="0.033" />
+</testsuite>

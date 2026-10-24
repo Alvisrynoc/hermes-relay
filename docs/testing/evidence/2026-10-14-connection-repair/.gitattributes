@@ -1,0 +1,2 @@
+# Preserve the exact evidence hash and unified-diff blank context markers.
+runtime-tests.patch -text whitespace=-blank-at-eol

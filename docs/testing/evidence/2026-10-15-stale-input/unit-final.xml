@@ -1,0 +1,6 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.data.SessionActivityRegistryTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-14T19:10:08.008Z" time="0.061">
+  <testcase name="authoritativeWorkingPreservesInputNewerThanSnapshot" classname="com.hermesandroid.relay.data.SessionActivityRegistryTest" time="0.052" />
+  <testcase name="authoritativeWorkingClearsOlderPendingInputOnlyForItsOwner" classname="com.hermesandroid.relay.data.SessionActivityRegistryTest" time="0.001" />
+  <testcase name="authoritativeWaitingPreservesOlderPendingInput" classname="com.hermesandroid.relay.data.SessionActivityRegistryTest" time="0.0" />
+</testsuite>

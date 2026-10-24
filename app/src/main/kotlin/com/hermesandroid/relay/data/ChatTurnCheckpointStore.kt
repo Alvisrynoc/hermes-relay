@@ -28,6 +28,11 @@ data class ChatTurnCheckpoint(
     val profileKey: String? = null,
     val sessionId: String,
     val liveSessionId: String? = null,
+    /** Native owner identities, absent on legacy Gateway checkpoints. No prompt or reply data. */
+    val canonicalSubmissionId: String? = null,
+    val canonicalAdmissionId: String? = null,
+    val canonicalCancelRequested: Boolean = false,
+    val canonicalEditUnconfirmed: Boolean = false,
     val transport: String,
     val user: ChatTurnUserCheckpoint,
     val assistant: ChatTurnAssistantCheckpoint,

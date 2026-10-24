@@ -464,7 +464,7 @@ sealed class Screen(
     // so no unresolved `{openAgentSheet}` leaks into the destination.
     data object Chat : Screen(
         "chat?openAgentSheet={openAgentSheet}&sessionId={sessionId}&profile={profile}" +
-            "&proactiveChatId={proactiveChatId}&connectionId={connectionId}",
+            "&proactiveChatId={proactiveChatId}&connectionId={connectionId}&reviewInput={reviewInput}",
         "Chat",
         Icons.AutoMirrored.Filled.Chat,
     ) {
@@ -473,6 +473,7 @@ sealed class Screen(
         const val ARG_PROFILE: String = "profile"
         const val ARG_PROACTIVE_CHAT_ID: String = "proactiveChatId"
         const val ARG_CONNECTION_ID: String = "connectionId"
+        const val ARG_REVIEW_INPUT: String = "reviewInput"
         fun route(
             openAgentSheet: Boolean = false,
             sessionId: String? = null,
@@ -2352,6 +2353,10 @@ fun RelayApp() {
                 composable(
                     route = Screen.Chat.route,
                     arguments = listOf(
+                        navArgument(Screen.Chat.ARG_REVIEW_INPUT) {
+                            type = NavType.BoolType
+                            defaultValue = false
+                        },
                         navArgument(Screen.Chat.ARG_OPEN_AGENT_SHEET) {
                             type = NavType.BoolType
                             defaultValue = false
@@ -2539,6 +2544,10 @@ fun RelayApp() {
                                             sessionId = target.sessionId,
                                         )) return@LaunchedEffect
                                     chatViewModel.clearVisibleConversationNotifications()
+                                    if (backStackEntry.arguments?.getBoolean(Screen.Chat.ARG_REVIEW_INPUT, false) == true) {
+                                        backStackEntry.arguments?.putBoolean(Screen.Chat.ARG_REVIEW_INPUT, false)
+                                        chatViewModel.reviewPendingInput(target)
+                                    }
                                 }
                             }
                         } else if (requestedProfileRoute != null) {

@@ -5,15 +5,21 @@ import com.hermesandroid.relay.network.upstream.models.MessagePagination
 import kotlinx.coroutines.CancellationException
 
 /** Explicit transcript read intent for Hermes' bounded messages endpoint. */
-enum class SessionMessageLoadMode {
-    /** Up to 500 newest messages, returned in chronological order. */
-    LATEST,
+sealed interface SessionMessageLoadMode {
+    /** One bounded newest-first window, returned in chronological order. */
+    data object LATEST : SessionMessageLoadMode
 
     /** Every page, oldest first, subject to Android memory safety bounds. */
-    COMPLETE,
+    data object COMPLETE : SessionMessageLoadMode
+
+    /** One earlier window counted from the newest end of the stored transcript. */
+    data class Older(val offset: Int) : SessionMessageLoadMode {
+        init { require(offset >= 0) }
+    }
 }
 
 internal const val SESSION_MESSAGE_PAGE_SIZE = 500
+internal const val RECENT_SESSION_MESSAGE_PAGE_SIZE = 50
 private const val MAX_COMPLETE_TRANSCRIPT_MESSAGES = 50_000
 private const val MAX_COMPLETE_TRANSCRIPT_PAYLOAD_CHARS = 32_000_000
 
@@ -37,16 +43,15 @@ internal suspend fun loadSessionMessages(
     fetchPage: suspend (SessionMessagePageRequest) -> Result<SessionMessagePage>,
 ): Result<List<MessageItem>> {
     return try {
-        val order = if (mode == SessionMessageLoadMode.LATEST) "latest" else "oldest"
+        val order = if (mode == SessionMessageLoadMode.COMPLETE) "oldest" else "latest"
         val collected = ArrayList<MessageItem>()
-        var offset = 0
+        var offset = (mode as? SessionMessageLoadMode.Older)?.offset ?: 0
         var payloadChars = 0L
-        var pageSize = SESSION_MESSAGE_PAGE_SIZE
+        val target = if (mode == SessionMessageLoadMode.COMPLETE) null else RECENT_SESSION_MESSAGE_PAGE_SIZE
+        var pageSize = target ?: SESSION_MESSAGE_PAGE_SIZE
 
         while (true) {
-            val limit = if (mode == SessionMessageLoadMode.LATEST) {
-                minOf(pageSize, SESSION_MESSAGE_PAGE_SIZE - collected.size)
-            } else pageSize
+            val limit = target?.let { minOf(pageSize, it - collected.size) } ?: pageSize
             val request = SessionMessagePageRequest(limit = limit, offset = offset, order = order)
             val page = try {
                 fetchPage(request).getOrThrow()
@@ -73,14 +78,14 @@ internal suspend fun loadSessionMessages(
                     "Session transcript exceeds Android's 50,000-message safe-load limit",
                 )
             }
-            if (mode == SessionMessageLoadMode.LATEST) {
+            if (mode != SessionMessageLoadMode.COMPLETE) {
                 // Upstream pages backwards from the tail, but each page is chronological.
                 collected.addAll(0, page.messages)
             } else {
                 collected += page.messages
             }
 
-            if (mode == SessionMessageLoadMode.LATEST && collected.size >= SESSION_MESSAGE_PAGE_SIZE) break
+            if (target != null && collected.size >= target) break
             // Older Hermes returned one unpaginated complete envelope. Never issue
             // a speculative second request against that contract.
             val pagination = page.pagination ?: break
@@ -97,4 +102,11 @@ internal suspend fun loadSessionMessages(
     } catch (error: Exception) {
         Result.failure(error)
     }
+}
+
+/** Keep explicitly loaded older rows when the newest page refreshes. No overlap means replace. */
+internal fun mergeRecentSessionHistory(previous: List<MessageItem>, recent: List<MessageItem>): List<MessageItem> {
+    val firstId = recent.firstOrNull()?.id?.takeIf(String::isNotBlank) ?: return recent
+    val overlap = previous.indexOfFirst { it.id == firstId }
+    return if (overlap >= 0) previous.take(overlap) + recent else recent
 }

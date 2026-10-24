@@ -58,6 +58,17 @@ class FixtureTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(fixture.running)
         async with self.session.get(f"{base_url}/api/sessions/{fixture.scenario.stored_session_id}/messages") as response:
             self.assertIn("Background work finished quietly.", await response.text())
+    async def test_subagent_roster_after_parent_completion_is_identity_scoped(self) -> None:
+        fixture, base_url = await self.start("subagent_roster_reconcile")
+        ws, _ = await self.connect(base_url)
+        await self.rpc(ws, 1, "prompt.submit")
+        await self.frames_until(ws, lambda f: f.get("params", {}).get("type") == "message.complete")
+        await self.rpc(ws, 2, "subagent.list", {"session_id": "fixture-live-roster"})
+        frames = await self.frames_until(ws, lambda f: f.get("id") == 2)
+        self.assertEqual([{"subagent_id": "still-running", "status": "running"}], frames[-1]["result"]["subagents"])
+        await self.rpc(ws, 3, "subagent.list", {"session_id": "foreign"})
+        frames = await self.frames_until(ws, lambda f: f.get("id") == 3)
+        self.assertEqual(4001, frames[-1]["error"]["code"])
 
     async def test_dashboard_setup_signin_expiry_and_loopback_are_distinct(self) -> None:
         fixture, base_url = await self.start("dashboard_onboarding")
@@ -86,6 +97,21 @@ class FixtureTestCase(unittest.IsolatedAsyncioTestCase):
         async with self.session.get(f"{base_url}/api/auth/me", headers=headers) as response:
             self.assertEqual({"detail": "Unauthorized"}, await response.json())
         self.assertEqual([], fixture._history_rows)
+
+    async def test_approval_remains_answerable_after_parent_terminal(self) -> None:
+        fixture, base_url = await self.start("post_turn_approval")
+        ws, _ = await self.connect(base_url)
+        await self.rpc(ws, 1, "client.capabilities", {"server_requests": True})
+        await self.frames_until(ws, lambda f: f.get("id") == 1)
+        await self.rpc(ws, 2, "prompt.submit")
+        frames = await self.frames_until(ws, lambda f: f.get("method") == "approval")
+        self.assertTrue(any(f.get("params", {}).get("type") == "message.complete" for f in frames))
+        self.assertFalse(fixture._running)
+        request = frames[-1]
+        self.assertEqual(1701, request["id"])
+        await ws.send_json({"jsonrpc": "2.0", "id": request["id"], "result": {"choice": "once"}})
+        await self.frames_until(ws, lambda f: f.get("params", {}).get("payload", {}).get("text") == "post-turn request settled")
+        self.assertIsNone(fixture._native_request)
 
     async def test_native_method_family_accepts_results_and_unsupported_errors(self) -> None:
         fixture, base_url = await self.start("server_requests")

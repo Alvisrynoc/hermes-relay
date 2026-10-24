@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-10-14T10:08:51.553Z" time="0.654">
+  <testcase name="recoverTurn activates exact live session and continues deltas and tool events" classname="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" time="0.533" />
+  <testcase name="existing session id is resumed not recreated" classname="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" time="0.03" />
+  <testcase name="recoverTurn falls back to durable resume when activate is unsupported" classname="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" time="0.015" />
+  <testcase name="socket loss mid-turn activates original session without resume and completes" classname="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" time="0.07" />
+</testsuite>

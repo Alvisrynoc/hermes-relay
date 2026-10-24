@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" tests="4" skipped="0" failures="0" errors="0" timestamp="2026-10-14T10:26:25.123Z" time="0.623">
+  <testcase name="input review admits replay before callbacks and stays desktop owned" classname="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" time="0.544" />
+  <testcase name="active snapshot accepts optional sanitized pending identities" classname="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" time="0.016" />
+  <testcase name="rejected input review drops buffered asks without replying in the next owner" classname="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" time="0.031" />
+  <testcase name="input review rejects stale admission without delivering or interrupting" classname="com.hermesandroid.relay.network.upstream.GatewayChatClientTest" time="0.024" />
+</testsuite>

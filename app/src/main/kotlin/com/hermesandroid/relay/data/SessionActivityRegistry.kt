@@ -78,6 +78,8 @@ data class SessionActivityRecord(
     val evidence: SessionActivityEvidence,
     val runtimeId: String? = null,
     val pendingInputs: Map<String, Long?> = emptyMap(),
+    /** Latest confirmed input observation, independent of turn/process evidence. */
+    val pendingInputObservedAtMillis: Long? = null,
     val backgroundProcessIds: Set<String> = emptySet(),
 ) {
     fun phase(nowMillis: Long = Long.MIN_VALUE): SessionActivityPhase {
@@ -330,13 +332,16 @@ data class SessionActivityRegistry(
         observedAtMillis: Long,
     ): SessionActivityRegistry {
         val previous = records[owner]
+        val pending = if (freshness == SessionActivityFreshness.Confirmed &&
+            previous?.pendingInputObservedAtMillis == null) emptyMap() else previous?.pendingInputs.orEmpty()
         val record = SessionActivityRecord(
             owner = owner,
             turnPhase = phase,
             freshness = freshness,
             evidence = SessionActivityEvidence(source, generation, observedAtMillis),
             runtimeId = runtimeId ?: previous?.runtimeId,
-            pendingInputs = previous?.pendingInputs.orEmpty(),
+            pendingInputs = pending,
+            pendingInputObservedAtMillis = previous?.pendingInputObservedAtMillis?.takeIf { pending.isNotEmpty() },
             backgroundProcessIds = previous?.backgroundProcessIds.orEmpty(),
         )
         val alias = runtimeId?.trim()?.takeIf { it.isNotEmpty() }
@@ -357,13 +362,18 @@ data class SessionActivityRegistry(
         val observedOwners = resolvedRuntimes.mapTo(mutableSetOf()) { requireNotNull(it.owner) }
         resolvedRuntimes.forEach { runtime ->
             val resolvedOwner = requireNotNull(runtime.owner)
+            val previous = state.records[resolvedOwner]
             state = state.putTurn(
                 resolvedOwner, runtime.runtimeId, runtime.status.phase(), SessionActivityFreshness.Confirmed,
                 SessionActivityEvidenceSource.ActiveList, update.generation, update.observedAtMillis,
             )
-            if (runtime.status == SessionLiveStatus.Idle) {
-                val idleRecord = requireNotNull(state.records[resolvedOwner]).copy(pendingInputs = emptyMap())
-                state = state.copy(records = state.records + (resolvedOwner to idleRecord))
+            val record = requireNotNull(state.records[resolvedOwner])
+            if (previous != null && previous.pendingInputs.isNotEmpty() &&
+                (previous.pendingInputObservedAtMillis ?: Long.MIN_VALUE) >= update.observedAtMillis) {
+                // Keep newer input evidence so another delayed snapshot cannot clear it.
+                state = state.copy(records = state.records + (resolvedOwner to record.copy(evidence = previous.evidence)))
+            } else if (runtime.status == SessionLiveStatus.Idle || runtime.status == SessionLiveStatus.Working) {
+                state = state.copy(records = state.records + (resolvedOwner to record.copy(pendingInputs = emptyMap(), pendingInputObservedAtMillis = null)))
             }
         }
         val snapshotCanSettle = update.isCompleteForScope && resolvedRuntimes.size == update.runtimes.size
@@ -378,6 +388,7 @@ data class SessionActivityRegistry(
                     freshness = SessionActivityFreshness.Confirmed,
                     runtimeId = null,
                     pendingInputs = emptyMap(),
+                    pendingInputObservedAtMillis = null,
                     evidence = SessionActivityEvidence(
                         SessionActivityEvidenceSource.ActiveList,
                         update.generation,
@@ -416,6 +427,7 @@ data class SessionActivityRegistry(
         val record = requireNotNull(settled.records[update.owner]).copy(
             runtimeId = null,
             pendingInputs = emptyMap(),
+            pendingInputObservedAtMillis = null,
         )
         return settled.copy(
             records = settled.records + (update.owner to record),
@@ -462,13 +474,24 @@ data class SessionActivityRegistry(
                 observedAtMillis,
             ),
         )
+        // Re-publishing cached/checkpoint hints must never reconfirm or revive live input.
+        if (!confirmed && (previous.freshness == SessionActivityFreshness.Confirmed ||
+            previous.pendingInputObservedAtMillis != null)) return this
+        val priorInputs = if (confirmed && previous.pendingInputObservedAtMillis == null) {
+            emptyMap()
+        } else previous.pendingInputs
         val pending = if (opened) {
-            previous.pendingInputs + (requestId to expiresAtMillis)
+            priorInputs + (requestId to expiresAtMillis)
         } else {
-            previous.pendingInputs - requestId
+            priorInputs - requestId
         }
         return copy(records = records + (owner to previous.copy(
             pendingInputs = pending,
+            pendingInputObservedAtMillis = when {
+                pending.isEmpty() -> null
+                confirmed && opened -> maxOf(previous.pendingInputObservedAtMillis ?: Long.MIN_VALUE, observedAtMillis)
+                else -> previous.pendingInputObservedAtMillis
+            },
             freshness = if (confirmed) SessionActivityFreshness.Confirmed else previous.freshness,
             evidence = if (confirmed) {
                 SessionActivityEvidence(
@@ -508,7 +531,9 @@ data class SessionActivityRegistry(
 
     private fun expirePendingInputs(nowMillis: Long): SessionActivityRegistry = copy(
         records = records.mapValues { (_, record) ->
-            record.copy(pendingInputs = record.pendingInputs.filterValues { it == null || it > nowMillis })
+            val pending = record.pendingInputs.filterValues { it == null || it > nowMillis }
+            record.copy(pendingInputs = pending,
+                pendingInputObservedAtMillis = record.pendingInputObservedAtMillis?.takeIf { pending.isNotEmpty() })
         },
     )
 

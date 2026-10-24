@@ -1,0 +1,9 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.data.SessionActivityRegistryTest" tests="6" skipped="0" failures="0" errors="0" timestamp="2026-10-15T07:09:43.173Z" time="0.01">
+  <testcase name="cachedCheckpointInputCannotOverrideConfirmedWorkingOrReturnAfterPolling" classname="com.hermesandroid.relay.data.SessionActivityRegistryTest" time="0.008" />
+  <testcase name="authoritativeWorkingPreservesInputNewerThanSnapshot" classname="com.hermesandroid.relay.data.SessionActivityRegistryTest" time="0.0" />
+  <testcase name="authoritativeWorkingClearsOlderPendingInputOnlyForItsOwner" classname="com.hermesandroid.relay.data.SessionActivityRegistryTest" time="0.001" />
+  <testcase name="processUpdatesDoNotMakeAnOldInputNewerThanWorkingSnapshot" classname="com.hermesandroid.relay.data.SessionActivityRegistryTest" time="0.0" />
+  <testcase name="liveWorkingDiscardsUnconfirmedColdCheckpointInput" classname="com.hermesandroid.relay.data.SessionActivityRegistryTest" time="0.0" />
+  <testcase name="authoritativeWaitingPreservesOlderPendingInput" classname="com.hermesandroid.relay.data.SessionActivityRegistryTest" time="0.0" />
+</testsuite>

@@ -267,6 +267,22 @@ internal class SubagentActivityController(
             .sortedWith(compareBy<SubagentActivity> { it.isTerminal }.thenBy { it.taskIndex })
     }
 
+    /** Roster absence retires a live card; it does not assert successful completion. */
+    fun reconcileRoster(sessionId: String, eventScopeKey: String?, revisions: Map<String, Long>, liveIds: Set<String>) {
+        if (sessionId != storedSessionId || eventScopeKey != scopeKey) return
+        _activities.value = _activities.value.filterNot { activity ->
+            val id = activity.subagentId
+            val absent = !activity.isTerminal && !id.isNullOrBlank() && id !in liveIds &&
+                revisions[activity.stableKey] == activity.revision
+            if (absent) {
+                retiredChildIds.add(id!!)
+                activity.childSessionId?.let(retiredChildIds::add)
+            }
+            absent
+        }
+        while (retiredChildIds.size > 256) retiredChildIds.remove(retiredChildIds.first())
+    }
+
     fun endTurn(turnId: String) {
         if (activeTurnId != turnId) return
         _activities.value = _activities.value.map { activity ->

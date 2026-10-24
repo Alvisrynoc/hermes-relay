@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-10-19T06:21:23.244Z" time="4.443">
+  <testcase name="authoritativeRosterRemovesOnlyMissingIdentifiedChildCardsAfterParentCompletion" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest" time="3.612" />
+  </testsuite>

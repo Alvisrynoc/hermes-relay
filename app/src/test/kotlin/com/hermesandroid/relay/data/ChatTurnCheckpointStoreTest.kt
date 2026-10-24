@@ -22,6 +22,13 @@ import org.junit.rules.TemporaryFolder
 
 class ChatTurnCheckpointStoreTest {
 
+    @Test fun `native admission identities and unresolved intent round trip without schema fork`() = runTest {
+        val checkpoint = sampleCheckpoint().copy(canonicalSubmissionId = "input-one", canonicalAdmissionId = "admission-one",
+            canonicalCancelRequested = true, canonicalEditUnconfirmed = true)
+        store.write(checkpoint)
+        assertEquals(checkpoint, store.read(checkpoint.contextKey, checkpoint.sessionId))
+    }
+
     @get:Rule
     val tempFolder = TemporaryFolder()
 

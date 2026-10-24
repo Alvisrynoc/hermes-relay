@@ -1,0 +1,4 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuite name="com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest" tests="1" skipped="0" failures="0" errors="0" timestamp="2026-10-14T17:18:04.552Z" time="5.981">
+  <testcase name="idleParentWithObservedChildrenPollsCompletionAtBusyCadence" classname="com.hermesandroid.relay.viewmodel.ChatViewModelGatewayInboundTurnTest" time="5.176" />
+</testsuite>

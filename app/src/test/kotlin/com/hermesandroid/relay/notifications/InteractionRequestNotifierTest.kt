@@ -70,6 +70,31 @@ class InteractionRequestNotifierTest {
     }
 
     @Test
+    fun newInputChannelEnablesVibration() {
+        assertTrue(post(approval("private"), SESSION_ID))
+        assertTrue(manager.getNotificationChannel(InteractionRequestNotifier.CHANNEL_ID).shouldVibrate())
+    }
+
+    @Test
+    fun existingInputChannelKeepsUserVibrationPreference() {
+        manager.createNotificationChannel(android.app.NotificationChannel(
+            InteractionRequestNotifier.CHANNEL_ID, "Input", NotificationManager.IMPORTANCE_HIGH,
+        ).apply { enableVibration(false) })
+        assertTrue(post(approval("private"), SESSION_ID))
+        assertFalse(manager.getNotificationChannel(InteractionRequestNotifier.CHANNEL_ID).shouldVibrate())
+    }
+
+    @Test
+    fun ownedInputTapRequestsReviewWhileOrdinaryConversationTapStaysPassive() {
+        val target = ChatNotificationTarget("connection-a", PROFILE, SESSION_ID)
+        assertFalse(target.route().contains("reviewInput"))
+        assertTrue(InteractionRequestNotifier.notify(context, SESSION_ID, approval("private"), PROFILE,
+            alertsEnabled = true, appForeground = false, connectionId = "connection-a"))
+        val tap = shadowOf(manager.activeNotifications.single().notification.contentIntent).savedIntent
+        assertEquals(target.route(reviewInput = true), tap.getStringExtra(MainActivity.EXTRA_NAV_ROUTE))
+    }
+
+    @Test
     fun copyAndPublicVersionNeverExposePromptCommandOrSecretMetadata() {
         val secret = GatewayAsk(
             kind = GatewayAsk.Kind.SECRET,
