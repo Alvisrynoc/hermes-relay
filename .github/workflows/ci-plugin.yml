@@ -112,6 +112,8 @@ jobs:
             plugin/tests/test_realtime_agent_openai_provider.py \
             plugin/tests/test_realtime_agent_xai_provider.py \
             plugin/tests/test_voice_output_routes.py \
+            plugin/tests/test_profile_voice_config.py \
+            plugin/tests/test_voice_lab.py \
             plugin/tests/test_session_grants.py \
             plugin/tests/test_native_layout_imports.py \
             plugin/tests/test_profile_discovery.py \
@@ -123,4 +125,6 @@ jobs:
             plugin/tests/test_android_tool.py \
             plugin/tests/test_android_navigate.py \
             plugin/tests/test_phone_platform.py \
-            plugin/tests/test_desktop_tool_availability.py
+            plugin/tests/test_desktop_tool_availability.py \
+            plugin/tests/test_desktop_multidevice.py \
+            plugin/tests/test_desktop_strict_id.py

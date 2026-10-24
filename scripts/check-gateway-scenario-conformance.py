@@ -40,6 +40,7 @@ API_BOUNDARY = "api.fallback_boundary"
 CLARIFY = "gateway.clarify"
 SERVER_REQUESTS = "gateway.server_requests"
 TICKET_PROTOCOL = "gateway.ticket_subprotocol"
+SESSION_AUTHORITY = "gateway.session_authority"
 ALL_CONTRACTS = (
     TICKET_PROTOCOL,
     SERVER_REQUESTS,
@@ -107,6 +108,61 @@ class SourceFile:
 
     def evidence(self, node: ast.AST, label: str) -> str:
         return f"{self.relative}:{getattr(node, 'lineno', 1)}:{label}"
+
+    def definition_source(self, name: str) -> SourceFile:
+        """Follow a declared import, never an unrelated similarly named helper on disk."""
+        imports = {
+            alias.asname or alias.name: (node.module, alias.name)
+            for node in self.tree.body if isinstance(node, ast.ImportFrom) and node.module
+            for alias in node.names
+        }
+        try:
+            definition = self.function(name)
+        except ValueError:
+            definition = None
+        if definition is not None:
+            for child in ast.walk(definition):
+                if (isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                        and child.func.attr == name and isinstance(child.func.value, ast.Name)
+                        and (binding := imports.get(child.func.value.id))):
+                    path = "/".join((binding[0].replace(".", "/"), binding[1])) + ".py"
+                    source = SourceFile(self.root, path)
+                    source.function(name)
+                    return source
+            return self
+        binding = imports.get(name)
+        if binding is None:
+            # API routes bind a decorated method from their imported mixin.
+            for node in ast.walk(self.tree):
+                if not isinstance(node, ast.Assign) or not any(
+                    isinstance(target, ast.Name) and target.id == name for target in node.targets
+                ):
+                    continue
+                owner = next((child.value.id for child in ast.walk(node.value)
+                              if isinstance(child, ast.Attribute) and child.attr == name
+                              and isinstance(child.value, ast.Name)), None)
+                binding = imports.get(owner or "")
+                if binding:
+                    break
+        if binding is None:
+            raise ValueError(f"missing definition or imported binding {name} in {self.relative}")
+        source = SourceFile(self.root, binding[0].replace(".", "/") + ".py")
+        source.function(name)
+        return source
+
+
+def _reachable(source: SourceFile, node: ast.AST) -> ast.Module:
+    definitions = {child.name: child for child in source.tree.body
+                   if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    nodes, seen = [node], {id(node)}
+    for current in nodes:
+        for child in ast.walk(current):
+            if isinstance(child, ast.Call) and isinstance(child.func, ast.Name):
+                target = definitions.get(child.func.id)
+                if target is not None and id(target) not in seen:
+                    nodes.append(target)
+                    seen.add(id(target))
+    return ast.Module(body=nodes, type_ignores=[])
 
 
 def _string_constants(node: ast.AST) -> set[str]:
@@ -196,7 +252,16 @@ def _check_gateway_terminal(server: SourceFile) -> CheckResult:
 def _check_session_initialization(server: SourceFile) -> CheckResult:
     try:
         build = server.function("_start_agent_build")
-        if not _call_lines(build, "_emit", "error") or "agent init failed:" not in server.segment(build):
+        failure_message = "agent init failed:" in server.segment(build)
+        if _call_lines(build, "agent_init_failed_message"):
+            facade = SourceFile(server.root, SERVER)
+            helper_source = facade.definition_source("agent_init_failed_message")
+            helper = helper_source.function("agent_init_failed_message")
+            failure_message = any(
+                isinstance(node, ast.Return) and node.value is not None
+                and any(isinstance(child, ast.Name) and child.id == "exc" for child in ast.walk(node.value))
+                for node in ast.walk(helper))
+        if not _call_lines(build, "_emit", "error") or not failure_message:
             raise ValueError("deferred build no longer emits the initialization failure")
         ready_owner = build
         if _call_lines(build, "_announce_built_agent"):
@@ -208,14 +273,14 @@ def _check_session_initialization(server: SourceFile) -> CheckResult:
         return CheckResult(SESSION_INITIALIZATION, False, (), str(exc))
 
 
-def _check_settled_info(server: SourceFile) -> CheckResult:
+def _check_settled_info(server: SourceFile, helper_source: SourceFile, turn_source: SourceFile) -> CheckResult:
     contract = GATEWAY_SETTLED_INFO
     try:
         info = server.function("_session_info")
-        helper = server.function("_emit_settled_session_info")
-        turn = server.function("_run_prompt_submit")
+        helper = helper_source.function("_emit_settled_session_info")
+        turn = turn_source.function("_run_prompt_submit")
         info_strings = _string_constants(info)
-        helper_text = server.segment(helper)
+        helper_text = helper_source.segment(helper)
         if "running" not in info_strings or ".get(\"running\")" not in server.segment(info):
             raise ValueError("session.info no longer derives running from live session state")
         if '"session.info"' not in helper_text or "_session_info(" not in helper_text:
@@ -231,8 +296,8 @@ def _check_settled_info(server: SourceFile) -> CheckResult:
             True,
             (
                 server.evidence(info, "session.info includes running"),
-                server.evidence(helper, "settled session.info emission"),
-                f"{SERVER}:{running_line}:running=false before line {settle_line}",
+                helper_source.evidence(helper, "settled session.info emission"),
+                f"{turn_source.relative}:{running_line}:running=false before line {settle_line}",
             ),
         )
     except ValueError as exc:
@@ -296,8 +361,24 @@ def _check_resume(methods: SourceFile) -> CheckResult:
     contract = SESSION_RESUME
     try:
         handler = methods.method_handler("session.resume")
-        text = methods.segment(handler)
-        strings = _string_constants(handler)
+        # Current upstream extracted resume into local helpers and a _Resume
+        # context. Follow only definitions reachable from this handler, so an
+        # unused legacy implementation cannot satisfy the contract.
+        definitions = {
+            node.name: node for node in methods.tree.body
+            if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name != "_"
+        }
+        nodes = [handler]
+        seen = {id(handler)}
+        for node in nodes:
+            for call in ast.walk(node):
+                if isinstance(call, ast.Call) and isinstance(call.func, ast.Name):
+                    target = definitions.get(call.func.id)
+                    if target is not None and id(target) not in seen:
+                        nodes.append(target)
+                        seen.add(id(target))
+        text = "\n".join(methods.segment(node) for node in nodes)
+        strings = set().union(*(_string_constants(node) for node in nodes))
         required_markers = (
             "db.get_session(",
             "db.resolve_resume_session_id(",
@@ -318,7 +399,7 @@ def _check_resume(methods: SourceFile) -> CheckResult:
         if not {4007, 4130}.issubset(
             {
                 child.value
-                for child in ast.walk(handler)
+                for node in nodes for child in ast.walk(node)
                 if isinstance(child, ast.Constant) and isinstance(child.value, int)
             }
         ):
@@ -399,9 +480,11 @@ def _check_api_boundary(api: SourceFile) -> CheckResult:
     contract = API_BOUNDARY
     try:
         session_stream = api.function("_handle_session_chat_stream")
-        chat_completions = api.function("_handle_chat_completions")
-        runs = api.function("_handle_runs")
-        source_strings = _string_constants(api.tree)
+        completion_source = api.definition_source("_handle_chat_completions")
+        chat_completions = completion_source.function("_handle_chat_completions")
+        runs_source = api.definition_source("_handle_runs")
+        runs = runs_source.function("_handle_runs")
+        source_strings = _string_constants(api.tree) | _string_constants(runs_source.tree)
         required_routes = {
             "/api/sessions/{session_id}/chat/stream",
             "/v1/chat/completions",
@@ -410,7 +493,11 @@ def _check_api_boundary(api: SourceFile) -> CheckResult:
         }
         missing_routes = sorted(required_routes - source_strings)
         stream_events = _string_constants(session_stream)
-        run_events = _string_constants(runs)
+        if _dynamic_run_terminal(api, session_stream):
+            stream_events.add("run.completed")
+        run_events = _string_constants(_reachable(runs_source, runs))
+        if _dynamic_run_terminal(runs_source, _reachable(runs_source, runs)):
+            run_events.add("run.completed")
         missing_stream = sorted({"assistant.completed", "run.completed", "done"} - stream_events)
         missing_runs = sorted({"message.delta", "run.completed"} - run_events)
         if missing_routes:
@@ -426,12 +513,33 @@ def _check_api_boundary(api: SourceFile) -> CheckResult:
                 api.evidence(
                     session_stream, "session SSE owns assistant.completed/run.completed/done"
                 ),
-                api.evidence(chat_completions, "OpenAI-compatible fallback is a separate handler"),
-                api.evidence(runs, "run API owns message.delta/run.completed lifecycle"),
+                completion_source.evidence(chat_completions, "OpenAI-compatible fallback is a separate handler"),
+                runs_source.evidence(runs, "run API owns message.delta/run.completed lifecycle"),
             ),
         )
     except ValueError as exc:
         return CheckResult(contract, False, (), str(exc))
+
+
+def _dynamic_run_terminal(source: SourceFile, node: ast.AST) -> bool:
+    """Verify the extracted terminal classifier behind f'run.{status}' events."""
+    if not any(isinstance(child, ast.JoinedStr) and any(
+        isinstance(value, ast.Constant) and value.value == "run." for value in child.values
+    ) for child in ast.walk(node)):
+        return False
+    if not _call_lines(node, "terminal_run_status"):
+        return False
+    helper_path = source.root / "gateway/platforms/api_server_runs.py"
+    if not helper_path.is_file():
+        return False
+    helper_source = SourceFile(source.root, "gateway/platforms/api_server_runs.py")
+    helper = helper_source.function("terminal_run_status")
+    bound = source.relative == helper_source.relative or any(
+        isinstance(statement, ast.ImportFrom)
+        and statement.module == "gateway.platforms"
+        and any(alias.name == "api_server_runs" for alias in statement.names)
+        for statement in source.tree.body)
+    return bound and {"completed", "failed", "cancelled", "interrupted"} <= _string_constants(helper)
 
 
 def _check_subagent_roster(root: Path) -> CheckResult:
@@ -520,31 +628,38 @@ def _check_session_exclusive_submit(
         submit = prompt_methods.method_handler("prompt.submit")
         create = session_methods.method_handler("session.create")
         build = server.function("_start_agent_build")
-        run_submit = server.function("_run_prompt_submit")
+        turn_source = SourceFile(server.root, "tui_gateway/prompt_turn.py") if (
+            server.root / "tui_gateway/prompt_turn.py").is_file() else server
+        run_submit = turn_source.function("_run_prompt_submit")
         submit_text = prompt_methods.segment(submit)
-        create_text = session_methods.segment(create)
-        build_text = server.segment(build)
-        run_text = server.segment(run_submit)
+        create_text = ast.unparse(_reachable(session_methods, create))
+        build_text = ast.unparse(_reachable(server, build))
+        run_text = ast.unparse(_reachable(turn_source, run_submit))
+        submit_text = ast.unparse(_reachable(prompt_methods, submit))
         active_text = active_sessions.text
         missing: list[str] = []
         if "_ensure_active_session_slot" not in submit_text or "4090" not in submit_text:
             missing.append("prompt.submit atomic ownership refusal")
-        if '"reason"' not in submit_text:
+        if "reason" not in _string_constants(_reachable(prompt_methods, submit)):
             missing.append("machine-readable refusal reason")
-        if "_ensure_active_session_slot" not in run_text or '"error"' not in run_text:
+        if "_ensure_active_session_slot" not in run_text or "error" not in _string_constants(_reachable(turn_source, run_submit)):
             missing.append("defense-in-depth terminal error event")
-        if "_schedule_agent_build" not in create_text or '"lazy"' not in create_text:
+        if "_schedule_agent_build" not in create_text or "lazy" not in _string_constants(_reachable(session_methods, create)):
             missing.append("lazy session.create readiness contract")
-        if '"session.info"' not in build_text or "ready.set()" not in build_text:
+        if "session.info" not in _string_constants(_reachable(server, build)) or "ready.set()" not in build_text:
             missing.append("deferred agent-ready session.info edge")
         for marker in (
             'SESSION_NOT_OWNED = "SESSION_NOT_OWNED"',
             "PER_SESSION_EXCLUSIVE_SUBMIT = True",
-            "already has a live owner",
-            "Only one surface at a time may run a session",
         ):
             if marker not in active_text:
                 missing.append(marker)
+        ownership_message = active_sessions.function("session_already_owned_message")
+        legacy_message = {"already has a live owner", "Only one surface at a time may run a session"}
+        if not (all(marker in active_sessions.segment(ownership_message) for marker in legacy_message)
+                or ("This chat is open in another Hermes window/terminal." in active_sessions.segment(ownership_message)
+                    and _call_lines(ownership_message, "session_owner_details"))):
+            missing.append("holder-aware ownership refusal message")
         if missing:
             raise ValueError("exclusive submit contract missing: " + ", ".join(missing))
         return CheckResult(
@@ -554,7 +669,7 @@ def _check_session_exclusive_submit(
                 prompt_methods.evidence(submit, "prompt.submit refuses ownership conflicts before turn start"),
                 session_methods.evidence(create, "session.create advertises a lazy deferred build"),
                 server.evidence(build, "deferred build emits session.info before setting ready"),
-                server.evidence(run_submit, "synthesized turns recheck ownership and emit terminal error"),
+                turn_source.evidence(run_submit, "synthesized turns recheck ownership and emit terminal error"),
                 f"{ACTIVE_SESSIONS}: SESSION_NOT_OWNED and canonical holder-aware message",
             ),
         )
@@ -576,11 +691,12 @@ def load_requirements(manifest: Path | None) -> tuple[str, ...]:
         return ALL_CONTRACTS
     if not isinstance(raw, list) or not raw or not all(isinstance(item, str) for item in raw):
         raise ValueError("scenario manifest contract_requirements must be a non-empty string array")
-    unknown = sorted(set(raw) - set(ALL_CONTRACTS))
+    known = (*ALL_CONTRACTS, SESSION_AUTHORITY)
+    unknown = sorted(set(raw) - set(known))
     if unknown:
         raise ValueError("unknown scenario contract requirement(s): " + ", ".join(unknown))
     requested = set(raw)
-    return tuple(contract for contract in ALL_CONTRACTS if contract in requested)
+    return tuple(contract for contract in known if contract in requested)
 
 
 def _check_server_requests(root: Path) -> CheckResult:
@@ -604,12 +720,28 @@ def _check_server_requests(root: Path) -> CheckResult:
     declared = {node.args[0].value for node in ast.walk(contracts.tree)
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == "server_request" and node.args and isinstance(node.args[0], ast.Constant)}
+    batch_source = root / "tools/clarify_batch.py"
+    if batch_source.is_file():
+        batch = SourceFile(root, "tools/clarify_batch.py")
+        settle = batch.function("settle_batch")
+        # The closing frame must merge the answers already locked, and timeout
+        # must preserve those answers with its distinct outcome.
+        settlement = (
+            "settle_batch(req.locked," in requests.segment(resolve)
+            and "settle_batch(locked," in requests.segment(send)
+            and {"answers", "outcome"} <= _string_constants(settle)
+            and "timed_out" in _string_constants(send)
+        )
+    else:
+        settlement = ({"answers", "timed_out", "timeout"} <= _string_constants(send)
+                      and "answers" in _string_constants(resolve))
     passed = (
-        expected == declared
+        # Additive request methods can be declined with JSON-RPC method-not-found.
+        expected <= declared
         and {"jsonrpc", "id", "method", "params", "session_id"} <= _string_constants(frame)
         and "answers" in _string_constants(snapshot)
-        and {"error", "result", "answers"} <= _string_constants(resolve)
-        and {"answers", "timed_out", "timeout"} <= _string_constants(send)
+        and {"error", "result"} <= _string_constants(resolve)
+        and settlement
         and bool(_call_lines(send, "_unanswerable"))
         and {"request.cancel", "id", "method", "reason"} <= _string_constants(cancel)
         and {"request_id", "question_id", "answer", "expired", "remaining"} <= _string_constants(lock_rpc)
@@ -653,13 +785,98 @@ def _check_clarify(server: SourceFile) -> CheckResult:
     )
 
 
+def _class_fields(source: SourceFile, name: str) -> dict[str, ast.AnnAssign]:
+    definition = next((node for node in source.tree.body
+                       if isinstance(node, ast.ClassDef) and node.name == name), None)
+    if definition is None:
+        raise ValueError(f"missing class {name} in {source.relative}")
+    return {node.target.id: node for node in definition.body
+            if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)}
+
+
+def _check_session_authority(root: Path) -> CheckResult:
+    """The owner-backed WS is a separate wire, not evidence from the legacy sidecar."""
+    try:
+        ws = SourceFile(root, "tui_gateway/ws.py")
+        fallback = SourceFile(root, "tui_gateway/ws_legacy_fallback.py")
+        schemas = SourceFile(root, "tui_gateway/contracts/canonical_sessions.py")
+        controls = SourceFile(root, "gateway/session_controls.py")
+        connection = ws.function("_authority_connection")
+        dispatch = ws.function("_dispatch_request")
+        owner_dispatch = controls.function("dispatch")
+        respond = controls.function("respond")
+        fallback_fn = fallback.function("legacy_fallback_allowed")
+        missing: list[str] = []
+        if not (_call_lines(connection, "AuthorityConnection")
+                and "session_authority" in ws.segment(connection)
+                and "session_authority" in _string_constants(ws.function("handle_ws"))):
+            missing.append("authority connection and ready advertisement")
+        if not (_call_lines(dispatch, "dispatch") and _call_lines(dispatch, "legacy_fallback_allowed")
+                and {"session.", "prompt.", "message."} <= _string_constants(fallback.tree)
+                and "_SESSION_FALLBACK_ALLOWED" in fallback.segment(fallback_fn)):
+            missing.append("authority dispatch with fenced legacy fallback")
+        if not (_call_lines(owner_dispatch, "canonical_param_problems")
+                and "CANONICAL_METHODS" in controls.segment(owner_dispatch)
+                and {4001, "invalid_params"} <= {node.value for node in ast.walk(owner_dispatch)
+                                               if isinstance(node, ast.Constant)}):
+            missing.append("closed canonical parameter validation")
+        expected = {
+            "CanonicalControlParams": {"execution_generation"},
+            "CanonicalApprovalParams": {"prompt_id", "choice"},
+            "CanonicalSnapshot": {"session_id", "execution_generation", "authority_epoch",
+                                  "subscription_id", "replay_epoch", "last_sequence", "pending", "prompts"},
+        }
+        for name, required in expected.items():
+            fields = _class_fields(schemas, name)
+            if not required <= fields.keys() or any(fields[key].value is not None for key in required & fields.keys()):
+                missing.append(f"required {name} identity fields")
+        approval = next(node for node in schemas.tree.body
+                        if isinstance(node, ast.ClassDef) and node.name == "CanonicalApprovalParams")
+        if not any(isinstance(base, ast.Name) and base.id == "CanonicalControlParams" for base in approval.bases):
+            missing.append("approval execution-generation inheritance")
+        for verb, params, result in (
+            ("session.resume", "CanonicalResumeParams", "CanonicalSnapshot"),
+            ("session.interrupt", "CanonicalControlParams", "CanonicalSessionHandle"),
+            ("approval.respond", "CanonicalApprovalParams", "PromptResponseResult"),
+        ):
+            if not any(isinstance(node, ast.Tuple) and len(node.elts) == 3
+                       and isinstance(node.elts[0], ast.Constant) and node.elts[0].value == verb
+                       and isinstance(node.elts[1], ast.Name) and node.elts[1].id == params
+                       and isinstance(node.elts[2], ast.Name) and node.elts[2].id == result
+                       for node in ast.walk(schemas.tree)):
+                missing.append(f"declared {verb} canonical contract")
+        if not _call_lines(schemas.tree, "canonical_method"):
+            missing.append("canonical registration")
+        required_response = {"session_id", "execution_generation", "prompt_id", "choice"}
+        if not any(isinstance(node, ast.Set) and _string_constants(node) == required_response
+                   for node in ast.walk(respond)) or not _call_lines(respond, "respond"):
+            missing.append("exact-prompt generation-fenced approval response")
+        return CheckResult(SESSION_AUTHORITY, not missing, (
+            ws.evidence(dispatch, "authority-backed dispatch and fenced fallback"),
+            controls.evidence(owner_dispatch, "closed canonical validation"),
+            controls.evidence(respond, "prompt and generation ownership"),
+            f"{schemas.relative}: declared snapshot and control contracts",
+        ), None if not missing else "Session authority contract missing: " + ", ".join(missing))
+    except ValueError as exc:
+        return CheckResult(SESSION_AUTHORITY, False, (), str(exc))
+
+
 def audit_sources(root: Path, requirements: Iterable[str]) -> list[CheckResult]:
+    requirements = tuple(requirements)
+    # Old standalone fixtures remain independently checkable. A default audit
+    # of a checkout exposing the owner-backed surface must qualify that wire too.
+    if requirements == ALL_CONTRACTS and (root / "tui_gateway/contracts/canonical_sessions.py").is_file():
+        requirements += (SESSION_AUTHORITY,)
     server = SourceFile(root, SERVER)
     methods = SourceFile(root, SESSION_METHODS)
     prompt_methods = SourceFile(root, PROMPT_METHODS)
     active_sessions = SourceFile(root, ACTIVE_SESSIONS)
     api = SourceFile(root, API_SERVER)
-    source_files = (server, methods, prompt_methods, active_sessions, api)
+    registry = (
+        SourceFile(root, "tui_gateway/session_registry.py")
+        if (root / "tui_gateway/session_registry.py").is_file() else server
+    )
+    source_files = (server, registry, methods, prompt_methods, active_sessions, api)
     fork_hits = [
         f"{source.relative}:{marker}"
         for source in source_files
@@ -670,6 +887,7 @@ def audit_sources(root: Path, requirements: Iterable[str]) -> list[CheckResult]:
         raise ValueError("fork marker(s) found in upstream source: " + ", ".join(fork_hits))
 
     checks = {
+        SESSION_AUTHORITY: lambda: _check_session_authority(root),
         TICKET_PROTOCOL: lambda: _check_ticket_protocol(
             SourceFile(root, "hermes_cli/web_server_chat.py"),
             SourceFile(root, "hermes_cli/web_routers/chat_ws.py"),
@@ -680,27 +898,34 @@ def audit_sources(root: Path, requirements: Iterable[str]) -> list[CheckResult]:
             SourceFile(root, "tui_gateway/prompt_turn.py")
             if (root / "tui_gateway/prompt_turn.py").is_file() else server
         ),
-        GATEWAY_SETTLED_INFO: lambda: _check_settled_info(server),
-        SESSION_ACTIVATE: lambda: _check_activate(server, methods),
+        GATEWAY_SETTLED_INFO: lambda: _check_settled_info(
+            server,
+            SourceFile(root, "tui_gateway/session_workdir.py")
+            if (root / "tui_gateway/session_workdir.py").is_file() else server,
+            SourceFile(root, "tui_gateway/prompt_turn.py")
+            if (root / "tui_gateway/prompt_turn.py").is_file() else server,
+        ),
+        SESSION_ACTIVATE: lambda: _check_activate(registry, methods),
         SESSION_RESUME: lambda: _check_resume(methods),
-        SESSION_ACTIVE_LIST: lambda: _check_active_list(server, methods),
+        SESSION_ACTIVE_LIST: lambda: _check_active_list(registry, methods),
         SESSION_EXCLUSIVE_SUBMIT: lambda: _check_session_exclusive_submit(
-            server, methods, prompt_methods, active_sessions,
+            registry, methods, prompt_methods, active_sessions,
         ),
         SUBAGENT_ROSTER: lambda: _check_subagent_roster(root),
         SUBAGENT_CHILD_WATCH: lambda: _check_subagent_child_watch(server, methods),
-        SESSION_INITIALIZATION: lambda: _check_session_initialization(server),
+        SESSION_INITIALIZATION: lambda: _check_session_initialization(registry),
         API_BOUNDARY: lambda: _check_api_boundary(api),
     }
     return [checks[requirement]() for requirement in requirements]
 
 
 def _check_ticket_protocol(auth: SourceFile, router: SourceFile) -> CheckResult:
-    parser = auth.function("_gateway_ws_ticket_from_subprotocol")
+    parser_source = auth.definition_source("_gateway_ws_ticket_from_subprotocol")
+    parser = parser_source.function("_gateway_ws_ticket_from_subprotocol")
     admission = auth.function("_ws_auth_reason")
     upgrade = router.function("gateway_ws")
     passed = (
-        {"hermes-gateway-v1", "hermes-gateway-ticket."} <= _string_constants(auth.tree)
+        {"hermes-gateway-v1", "hermes-gateway-ticket."} <= _string_constants(parser_source.tree)
         and {"sec-websocket-protocol", "invalid", "ok"} <= _string_constants(parser)
         and bool(_call_lines(admission, "_gateway_ws_ticket_from_subprotocol"))
         and bool(_call_lines(admission, "consume_ticket"))
@@ -716,7 +941,7 @@ def _check_ticket_protocol(auth: SourceFile, router: SourceFile) -> CheckResult:
     )
     return CheckResult(
         TICKET_PROTOCOL, passed,
-        (auth.evidence(parser, "ticket protocol parser"),
+        (parser_source.evidence(parser, "ticket protocol parser"),
          auth.evidence(admission, "single-use query or protocol admission"),
          router.evidence(upgrade, "public protocol selection")),
         None if passed else "Gateway ticket admission or public subprotocol selection changed",

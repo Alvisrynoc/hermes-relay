@@ -121,13 +121,15 @@ class GatewayChatClient(
     private val turnIdleTimeoutMs: Long = TURN_TIMEOUT_MS,
     /** Test seam — lazy session.create/resume readiness barrier. */
     private val sessionReadyTimeoutMs: Long = SESSION_READY_TIMEOUT_MS,
-    /** Test seam — compaction idle lease. Production keeps [COMPACTING_TIMEOUT_MS]. */
-    private val compactingTimeoutMs: Long = COMPACTING_TIMEOUT_MS,
     /** Random source for ordinary reconnect full-jitter. */
     private val reconnectJitterUnit: () -> Double = { kotlin.random.Random.nextDouble() },
 ) : GatewayProfileEditorClient {
     /** Existing upstream rich-chat vocabulary; do not invent a Relay-only source. */
     private val sessionSource = "webui"
+    private val canonicalSessions = GatewayCanonicalSessions()
+    private val canonicalMutations = GatewayCanonicalMutations()
+    private val canonicalDescribeMutex = Mutex()
+    @Volatile private var canonicalDescribed = false
     @Volatile
     private var profileDescribeSupported: Boolean? = null
     @Volatile
@@ -145,36 +147,11 @@ class GatewayChatClient(
         private const val BOT_CHAT_TITLE = "Bot Chat"
 
         /**
-         * Idle-progress turn watchdog — reset on EVERY received gateway event
-         * (deltas, tool events, status lines), so it only fires after this
-         * long with no events at all. It is NOT a hard turn cap: a turn that
-         * keeps streaming lives indefinitely, and a slow `prompt.submit` ack
-         * is bounded separately by [PROMPT_SUBMIT_REQUEST_TIMEOUT_MS].
+         * Quiet-period interval for a read-only liveness check. Silence never
+         * interrupts or fails a turn; exact server Idle can recover a lost final
+         * frame through the existing authoritative history reconciliation.
          */
         private const val TURN_TIMEOUT_MS = 180_000L
-
-        /**
-         * Ask requests block the agent server-side with NO events flowing
-         * until answered — arm with headroom over each kind's upstream block
-         * timeout (clarify/secret 300s, sudo 120s; approval/terminal-read
-         * unbounded). The next regular event rearms [TURN_TIMEOUT_MS].
-         */
-        private const val ASK_CLARIFY_SECRET_TIMEOUT_MS = 330_000L
-        private const val ASK_SUDO_TIMEOUT_MS = 150_000L
-        private const val ASK_UNBOUNDED_TIMEOUT_MS = 600_000L
-
-        /**
-         * Server-side context compaction summarizes the transcript through a
-         * (possibly slow) model with NO deltas or tool events flowing until it
-         * finishes — near the context ceiling that silence routinely exceeds
-         * [TURN_TIMEOUT_MS], so the idle watchdog would `session.interrupt` a
-         * healthy compression, roll back its work, and retrigger on the next
-         * prompt forever. A `status.update` event with kind `compacting`
-         * (emitted at compaction start, and periodically by newer gateways)
-         * arms this longer leash instead; any regular event rearms
-         * [TURN_TIMEOUT_MS].
-         */
-        private const val COMPACTING_TIMEOUT_MS = 600_000L
 
         private const val RPC_TIMEOUT_MS = 15_000L
         const val PROFILE_AVATAR_MAX_BYTES = 2_000_000
@@ -250,16 +227,6 @@ class GatewayChatClient(
          * server then finished and whose answer was silently dropped.
          */
         private const val MAX_MIDTURN_REJOIN_MS = 20_000L
-
-        /**
-         * After a route RETARGET (LAN⇄Tailscale mid-turn), the fresh socket
-         * can't pick up the in-flight turn's events — upstream `session.resume`
-         * doesn't reattach to a running turn. So arm a SHORT settle on the
-         * reconnect: if nothing flows we fail fast and the post-turn reconcile
-         * recovers the server's answer, instead of waiting the full turn
-         * watchdog. Any live event resets it back to the normal timeout.
-         */
-        private const val POST_RETARGET_SETTLE_MS = 30_000L
 
         private const val DEFAULT_COLS = 80
 
@@ -596,12 +563,28 @@ class GatewayChatClient(
      * their terminal event can trigger an authoritative history reconcile.
      */
     private val backgroundTurns = ConcurrentHashMap<String, BackgroundTurn>()
+    private val canonicalCancellations = ConcurrentHashMap<String, CanonicalSubmission>()
 
     private data class BackgroundTurn(
         val storedSessionId: String,
         val profile: String?,
         @Volatile var pendingAsk: GatewayAsk? = null,
+        val canonicalSubmission: CanonicalSubmission? = null,
     )
+
+    private class CanonicalSubmission(identity: GatewayAdmissionIdentity? = null) {
+        val submissionId: String = identity?.submissionId ?: java.util.UUID.randomUUID().toString()
+        val restored = identity != null
+        @Volatile var admissionId: String? = identity?.admissionId
+        @Volatile var awaitingReceipt = false
+        @Volatile var nativeParams: JsonObject? = null
+        @Volatile var cancelRequested = false
+        @Volatile var sessionId: String? = null
+        @Volatile var storedSessionId: String? = null
+        @Volatile var profile: String? = null
+        @Volatile var pipelineParams: JsonObject? = null
+        val frames = mutableListOf<String>()
+    }
 
     private class ChildWatchRegistration(
         val storedSessionId: String,
@@ -697,6 +680,8 @@ class GatewayChatClient(
         val storedSessionId: String,
         val liveSessionId: String,
         val progressGeneration: Long,
+        val socket: WebSocket,
+        val profile: String?,
     )
 
     /**
@@ -858,12 +843,21 @@ class GatewayChatClient(
                 }
                 if (turn.cancelled) return@launch
                 val stagedImagePaths = mutableListOf<String>()
+                val canonicalAttachments = mutableListOf<JsonObject>()
                 val attachmentRefs = attachments.mapNotNull { attachment ->
                     val upload = uploadAttachment(attachment).getOrElse { e ->
                         cleanupStagedAttachments(stagedImagePaths)
                         throw GatewayAttachmentPreflightException("attachment upload failed: ${e.message}")
                     }
                     stagedImagePaths += upload.attachedImagePaths()
+                    if (canonicalSessions.enabled && attachment.contentType.startsWith("image/")) {
+                        val path = upload.stringField("path")
+                            ?: throw GatewayAttachmentPreflightException("Hermes returned no staged image path")
+                        canonicalAttachments += buildJsonObject {
+                            put("path", path)
+                            put("mime", upload.stringField("mime") ?: attachment.contentType)
+                        }
+                    }
                     if (attachment.requiresPromptReference()) {
                         upload.stringField("ref_text")
                             ?: run {
@@ -889,6 +883,12 @@ class GatewayChatClient(
                 // prior turn's optional late-terminal drain.
                 settledTurnDrain = null
                 activeTurn = turn
+                if (canonicalSessions.enabled) {
+                    turn.canonicalSubmission.awaitingReceipt = true
+                    turn.canonicalSubmission.sessionId = liveSessionId
+                    turn.canonicalSubmission.storedSessionId = storedSessionId
+                    turn.canonicalSubmission.profile = liveSessionProfile ?: currentSessionProfile()
+                }
                 turn.armWatchdog()
                 // Generic `file.attach` uploads are staged artifacts, not
                 // session-owned image/PDF attachments. The gateway returns
@@ -903,6 +903,8 @@ class GatewayChatClient(
                     buildJsonObject {
                         put("session_id", liveSessionId ?: error("no live session"))
                         put("text", submittedText)
+                        if (canonicalSessions.enabled) put("submission_id", turn.canonicalSubmission.submissionId)
+                        if (canonicalAttachments.isNotEmpty()) put("attachments", JsonArray(canonicalAttachments))
                         if (truncateBeforeUserOrdinal != null || truncateBeforeRowId != null) {
                             put("confirm_truncate", true)
                         }
@@ -919,6 +921,14 @@ class GatewayChatClient(
                     timeoutMs = promptSubmitTimeoutMs,
                 )
                 if (submitted.isFailure) {
+                    if (canonicalSessions.enabled && (submitted.exceptionOrNull() as? GatewayRpcException)?.code == null) {
+                        // The stable submission key remains on this turn. Reattach and ask the
+                        // owner for that same admission; never create a new submission after a lost ACK.
+                        turn.markTransportAccepted()
+                        turn.markTransportRecoveryStarted()
+                        webSocket?.cancel()
+                        return@launch
+                    }
                     // Once this turn's own events are flowing (or it already
                     // finished), the prompt provably reached the server — a
                     // slow, lost, or socket-severed ack must NOT preflight-fail
@@ -960,6 +970,9 @@ class GatewayChatClient(
                     throw GatewayPreflightException(
                         submitError?.message ?: "prompt.submit failed",
                     )
+                }
+                if (canonicalSessions.enabled) {
+                    finishCanonicalReceipt(turn.canonicalSubmission, submitted.getOrThrow())
                 }
                 turn.markTransportAccepted()
                 (submitted.getOrNull()?.get("survivor_user_row_ids") as? JsonArray)?.let { raw ->
@@ -1036,6 +1049,7 @@ class GatewayChatClient(
             storedSessionId = storedId,
             profile = liveSessionProfile,
             pendingAsk = turn.pendingInteraction,
+            canonicalSubmission = turn.canonicalSubmission,
         )
         backgroundTurns[liveId] = backgroundTurn
         backgroundTurn.pendingAsk?.let { ask ->
@@ -1071,6 +1085,14 @@ class GatewayChatClient(
     fun currentLiveSessionId(storedId: String): String? =
         liveSessionId?.takeIf { storedSessionId == storedId }
 
+    fun currentAdmissionIdentity(storedId: String): GatewayAdmissionIdentity? {
+        val binding = (if (storedSessionId == storedId) activeTurn?.takeIf { it.androidOwned }?.canonicalSubmission
+            else backgroundTurns.values.singleOrNull { it.storedSessionId == storedId }?.canonicalSubmission
+            ) ?: canonicalCancellations.values.singleOrNull { (it.storedSessionId ?: it.sessionId) == storedId }
+        return binding?.takeIf { it.sessionId != null || it.nativeParams != null || it.restored }?.let { GatewayAdmissionIdentity(it.submissionId, it.admissionId, it.cancelRequested,
+            it.pipelineParams != null && it.admissionId == null) }
+    }
+
     /**
      * Exact durable/profile owner already held by this client for [runtimeId].
      * Unlike `session.active_list`, this mapping is safe for multiplexed profiles
@@ -1098,14 +1120,9 @@ class GatewayChatClient(
         Log.i(TAG, "Gateway retargeting to a new route (turn active=${hasActiveTurn()})")
         routeTransport = RouteTransport(newDashboardClient, socketClient(newDashboardClient.okHttpClient))
         if (hasActiveTurn()) {
-            retargetedThisTurn = activeTurn?.ended == false
             webSocket?.cancel()
         }
     }
-
-    /** Set by [retarget] so the rejoin arms the short post-retarget settle once. */
-    @Volatile
-    private var retargetedThisTurn = false
 
     /**
      * Toggle the opt-in background keep-alive (sideload). While on, the socket
@@ -1319,7 +1336,7 @@ class GatewayChatClient(
                 // this resume. Unknown gateway sessions captured during the
                 // narrow ack race remain foreign and are discarded.
                 val replay = pending.closeAndTake(liveChildId)
-                if (replay.truncated) dispatchedCallbacks.onReconcileRequired()
+                if (replay.truncated) dispatchedCallbacks.onReconcileRequired(false)
                 replay.events.forEach { event ->
                     if (childWatches[liveChildId] === registration) {
                         registration.mapper.onEvent(event.type, event.payload)
@@ -1504,6 +1521,9 @@ class GatewayChatClient(
         queuedTurnProvider: ((GatewayQueuedTurn) -> GatewayInboundTurnRegistration?)? = null,
         androidOwned: Boolean = true,
         onHandle: ((ActiveTurnHandle) -> Boolean)? = null,
+        canonicalSubmissionId: String? = null,
+        canonicalAdmissionId: String? = null,
+        canonicalEditUnconfirmed: Boolean = false,
     ): Result<GatewaySessionRecovery> = runCatching {
         require(storedId.isNotBlank()) { "stored session id required" }
         val requestedProfile = currentSessionProfile()
@@ -1513,6 +1533,17 @@ class GatewayChatClient(
                 throw GatewayRpcException("a gateway turn is already attached")
             }
             ensureConnected()
+            if (canonicalSessions.enabled && androidOwned && canonicalSubmissionId == null && canonicalAdmissionId == null) {
+                // Old checkpoints cannot identify a native admission. Keep the existing
+                // HTTP-history/activity observer path; do not attach or refresh its policy.
+                return@withLock GatewaySessionRecovery(storedId, preferredLiveId ?: storedId,
+                    running = false, status = null, inflight = null, queued = null, handle = null)
+            }
+            if (canonicalSessions.enabled && canonicalEditUnconfirmed && canonicalAdmissionId == null)
+                throw GatewayRpcException("The saved history edit has no confirmed admission; reopen history and resolve it explicitly", 4098)
+            var recoveryIdentity = if (canonicalSessions.enabled && (canonicalSubmissionId != null || canonicalAdmissionId != null))
+                GatewayAdmissionIdentity(canonicalSubmissionId, canonicalAdmissionId) else null
+            val recoverOwned = androidOwned && (!canonicalSessions.enabled || recoveryIdentity != null)
 
             var response: JsonObject? = null
             var boundTurn: GatewayTurn? = null
@@ -1534,7 +1565,8 @@ class GatewayChatClient(
                     callbacks = dispatchOn(callbacks),
                     dedupeAdjacentMessageStarts = true,
                     deferEvents = true,
-                    androidOwned = androidOwned,
+                    androidOwned = recoverOwned,
+                    canonicalIdentity = recoveryIdentity,
                 ).also { turn ->
                     turn.markRecoveredStarted()
                     activeTurn = turn
@@ -1573,6 +1605,7 @@ class GatewayChatClient(
                             put("omit_messages", true)
                             put("cols", DEFAULT_COLS)
                             put("source", sessionSource)
+                            put("omit_messages", true)
                             requestedProfile?.let { put("profile", it) }
                         },
                     ).getOrElse { error ->
@@ -1616,6 +1649,19 @@ class GatewayChatClient(
             liveSessionProfile = requestedProfile
             updateCancelledDrainLiveSession(storedId, recoveredLiveId)
             applySessionResultInfo(response)
+            if (canonicalSessions.enabled && androidOwned && recoverOwned) {
+                val admission = recoveryIdentity?.admissionId ?: (response["pending"] as? JsonArray).orEmpty()
+                    .mapNotNull { it as? JsonObject }.singleOrNull { it.stringField("input_id") == canonicalSubmissionId }
+                    ?.stringField("admission_id")
+                val receipt = admission?.let { id -> rpc("prompt.receipt", buildJsonObject {
+                    put("session_id", recoveredLiveId); put("admission_id", id)
+                    requestedProfile?.let { put("profile", it) }
+                }).getOrThrow() }
+                if (receipt?.stringField("status") == "unknown") throw GatewayRpcException("The saved Hermes admission needs explicit owner recovery", 4097)
+                response = JsonObject(response + ("running" to JsonPrimitive(receipt?.stringField("status") in setOf("queued", "started"))))
+                recoveryIdentity = GatewayAdmissionIdentity(canonicalSubmissionId, admission)
+                boundTurn?.canonicalSubmission?.admissionId = admission
+            }
 
             val inflight = (response["inflight"] as? JsonObject)?.let { value ->
                 GatewayInflightTurn(
@@ -1642,7 +1688,8 @@ class GatewayChatClient(
                     ?.takeIf { it.isNotBlank() }
                     ?.let(::GatewayQueuedTurn)
             }
-            val running = response.booleanField("running") == true || inflight?.streaming == true
+            val running = (response.booleanField("running") == true || inflight?.streaming == true) &&
+                (!canonicalSessions.enabled || !androidOwned || recoverOwned)
             val autoContinue = (response["auto_continue"] as? JsonObject)?.let { value ->
                 val attempt = value.stringField("attempt")?.toIntOrNull()
                     ?: (value["attempt"] as? JsonPrimitive)?.intOrNull
@@ -1662,7 +1709,8 @@ class GatewayChatClient(
                         callbacks = dispatchOn(callbacks),
                         dedupeAdjacentMessageStarts = true,
                         deferEvents = true,
-                        androidOwned = androidOwned,
+                        androidOwned = recoverOwned,
+                        canonicalIdentity = recoveryIdentity,
                     ).also { turn ->
                         turn.markRecoveredStarted()
                         activeTurn = turn
@@ -1763,9 +1811,15 @@ class GatewayChatClient(
      */
     suspend fun steer(text: String): SteerResult {
         val sid = liveSessionId ?: return SteerResult.Failed
+        val ownReceipt = if (canonicalSessions.enabled && activeTurn?.androidOwned == true) {
+            val admission = activeTurn?.canonicalSubmission?.admissionId ?: return SteerResult.Failed
+            rpc("prompt.receipt", buildJsonObject { put("session_id", sid); put("admission_id", admission) })
+                .getOrNull()?.takeIf { it.stringField("status") == "started" } ?: return SteerResult.Failed
+        } else null
         val params = buildJsonObject {
             put("session_id", sid)
             put("text", text)
+            ownReceipt?.get("execution_generation")?.let { put("execution_generation", it) }
         }
         val redirect = rpc("session.redirect", params)
         val result = if (redirect.isLegacyRedirectUnsupported()) {
@@ -1865,7 +1919,7 @@ class GatewayChatClient(
     ): Result<GatewayAskResponse> {
         if (!ask.serverRequest) return when (ask.kind) {
             GatewayAsk.Kind.CLARIFY -> ask.requestId?.let { respondClarify(it, if (cancel) "This supervised client cannot answer interactive requests." else value, questionId) }
-            GatewayAsk.Kind.APPROVAL -> respondApproval(value)
+            GatewayAsk.Kind.APPROVAL -> respondApproval(value, requestId = ask.requestId)
             GatewayAsk.Kind.SUDO -> ask.requestId?.let { respondSudo(it, value) }
             GatewayAsk.Kind.SECRET -> ask.requestId?.let { respondSecret(it, value) }
         } ?: Result.failure(GatewayRpcException("ask has no request id"))
@@ -2040,6 +2094,11 @@ class GatewayChatClient(
     private fun replayServerRequests(snapshot: JsonObject, sessionId: String? = liveSessionId) {
         if (sessionId == null) return
         val ready = readySignal ?: return
+        if (canonicalSessions.enabled && snapshot.containsKey("prompts")) {
+            canonicalSessions.promptEvents(sessionId, liveSessionProfile ?: currentSessionProfile()).forEach { (type, payload) ->
+                handleEvent(type, payload, sessionId, ready)
+            }
+        }
         val frames = (snapshot["open_requests"] as? JsonArray)?.mapNotNull { it as? JsonObject }.orEmpty()
         val deferred = synchronized(serverRequestLock) { deferredServerRequests.toList().also { deferredServerRequests.clear() } }
         val boundary = (snapshot["_android_request_sequence"] as? JsonPrimitive)?.longOrNull ?: serverRequestSequence.get()
@@ -2152,7 +2211,7 @@ class GatewayChatClient(
      * session, not a request id. [choice] is "approve" or "deny"; [all]
      * resolves every pending approval on the session at once.
      */
-    suspend fun respondApproval(choice: String, all: Boolean = false): Result<GatewayAskResponse> {
+    suspend fun respondApproval(choice: String, all: Boolean = false, requestId: String? = null): Result<GatewayAskResponse> {
         val respondingTurn = activeTurn
         val sid = liveSessionId
             ?: return Result.failure(GatewayRpcException("no live session"))
@@ -2162,10 +2221,12 @@ class GatewayChatClient(
                 put("session_id", sid)
                 put("choice", choice)
                 put("all", all)
+                if (canonicalSessions.enabled) requestId?.let { put("request_id", it) }
             },
         ).map {
             it.gatewayAskResponse().also {
-                respondingTurn?.acknowledgeInteraction(GatewayAskExpiry(GatewayAsk.Kind.APPROVAL, null))
+                respondingTurn?.acknowledgeInteraction(GatewayAskExpiry(GatewayAsk.Kind.APPROVAL,
+                    if (canonicalSessions.enabled) requestId else null))
             }
         }
     }
@@ -2870,16 +2931,16 @@ class GatewayChatClient(
     }
 
     /**
-     * Capture only a locally submitted/recovered turn. Merely observing an
-     * exact session through the shared Gateway socket never grants Android
-     * authority to settle Desktop/TUI work.
+     * Capture a locally admitted stream, including an exact unsolicited turn.
+     * Settling its UI from read-only state does not attach or stop the runtime.
      */
     private fun captureActiveTurnLivenessProbe(): ActiveTurnLivenessProbe? {
         val turn = activeTurn ?: return null
         val generation = turn.captureLivenessGeneration() ?: return null
         val storedId = storedSessionId ?: return null
         val liveId = liveSessionId ?: return null
-        return ActiveTurnLivenessProbe(turn, storedId, liveId, generation)
+        val socket = webSocket ?: return null
+        return ActiveTurnLivenessProbe(turn, storedId, liveId, generation, socket, liveSessionProfile)
     }
 
     /**
@@ -2894,6 +2955,8 @@ class GatewayChatClient(
     ) {
         probe ?: return
         if (activeTurn !== probe.turn ||
+            webSocket !== probe.socket ||
+            liveSessionProfile != probe.profile ||
             storedSessionId != probe.storedSessionId ||
             liveSessionId != probe.liveSessionId
         ) return
@@ -3330,7 +3393,9 @@ class GatewayChatClient(
     }
 
     fun shutdown() {
-        activeTurn?.cancel()
+        activeTurn?.let { turn ->
+            if (turn.androidOwned) turn.cancel() else turn.detach()
+        }
         activeTurn = null
         backgroundTurns.clear()
         cancelledTurnDrain = null
@@ -3792,6 +3857,7 @@ class GatewayChatClient(
                     val method = input.stringField("method") ?: return@mapNotNull null
                     GatewayPendingInput(id, method)
                 }.orEmpty(),
+            // Missing/null is unavailable advisory data, never evidence for retiring a child roster.
             activeSubagentCount = (row["active_subagent_count"] as? JsonPrimitive)?.intOrNull
                 ?.coerceAtLeast(0) ?: 0,
         )
@@ -3836,6 +3902,8 @@ class GatewayChatClient(
                     put("omit_messages", true)
                     put("cols", DEFAULT_COLS)
                     put("source", sessionSource)
+                    // Visible history comes from Dashboard HTTP, not this binding response.
+                    put("omit_messages", true)
                     requestedProfile?.let { put("profile", it) }
                 },
             )
@@ -3904,6 +3972,8 @@ class GatewayChatClient(
         liveId: String,
         sessionResult: JsonObject? = null,
     ) {
+        // The authority constructs the agent when it claims an admission, after submit.
+        if (canonicalSessions.enabled) return
         sessionReadyFailures[liveId]?.let { throw GatewayPreflightException(it) }
         val lazy = (sessionResult?.get("info") as? JsonObject)?.booleanField("lazy") == true
         if (lazy) lazyLiveSessions += liveId
@@ -4106,8 +4176,28 @@ class GatewayChatClient(
         val method = frame.stringField("method")
         if (method != "event") return
         val params = frame["params"] as? JsonObject ?: return
-        val type = params.stringField("type") ?: return
-        val payload = params["payload"] as? JsonObject
+        if (canonicalSessions.enabled) {
+            val sid = params.stringField("session_id")
+            val binding = if (sid == liveSessionId) activeTurn?.takeIf { it.androidOwned && !it.ended }?.canonicalSubmission
+                else sid?.let { backgroundTurns[it]?.canonicalSubmission }
+            if (binding != null && params.stringField("admission_id") != null) {
+                synchronized(binding) {
+                    if (binding.awaitingReceipt) {
+                        if (binding.frames.size >= 2048) {
+                            activeTurn?.failFromTransport("Gateway admission replay exceeded its bounded buffer")
+                        } else binding.frames += frameText
+                        return
+                    }
+                    if (binding.admissionId != null && params.stringField("admission_id") != binding.admissionId) return
+                }
+            }
+        }
+        if (!canonicalSessions.observeEvent(params, liveSessionProfile ?: currentSessionProfile())) return
+        val nativeType = params.stringField("type") ?: return
+        val type = if (canonicalSessions.enabled && nativeType in setOf("approval.settled", "clarify.settled"))
+            nativeType.substringBefore('.') + ".expire" else nativeType
+        val payload = if (canonicalSessions.enabled) canonicalSessions.promptPayload(params["payload"] as? JsonObject)
+            else params["payload"] as? JsonObject
         val eventSessionId = params.stringField("session_id")
 
         handleEvent(type, payload, eventSessionId, ready)
@@ -4188,6 +4278,8 @@ class GatewayChatClient(
         }
 
         if (type == "gateway.ready") {
+            canonicalSessions.enabled = payload?.booleanField("session_authority") == true
+            canonicalDescribed = false
             if (!ready.isCompleted) {
                 // Enqueue before releasing readiness: create/resume must never outrun this advertisement.
                 // No acknowledgement is needed; legacy gateways may return method-not-found.
@@ -4593,6 +4685,8 @@ class GatewayChatClient(
         disposition: GatewayReconnectDisposition = GatewayReconnectDisposition.Retryable,
     ) {
         Log.i(TAG, "Gateway socket down ($reason)")
+        canonicalSessions.reset()
+        canonicalDescribed = false
         // Capture the in-flight session id BEFORE clearing it — the mid-turn
         // rejoin restores it so the running turn's tail (still tagged with this
         // id on the shared gateway stream) keeps matching after reconnect.
@@ -4630,7 +4724,7 @@ class GatewayChatClient(
         failChildWatches("Child watch disconnected from the gateway")
         val turn = activeTurn
         if (turn == null) {
-            if (backgroundTurns.isNotEmpty() && !backgroundRejoinInProgress) {
+            if ((backgroundTurns.isNotEmpty() || canonicalCancellations.isNotEmpty()) && !backgroundRejoinInProgress) {
                 backgroundRejoinInProgress = true
                 scope.launch {
                     try {
@@ -4678,12 +4772,13 @@ class GatewayChatClient(
     private suspend fun attemptBackgroundTurnRejoin() {
         val deadline = System.currentTimeMillis() + midTurnRejoinWindowMs
         var backoffMs = 500L
-        while (backgroundTurns.isNotEmpty() && System.currentTimeMillis() < deadline) {
+        while ((backgroundTurns.isNotEmpty() || canonicalCancellations.isNotEmpty()) && System.currentTimeMillis() < deadline) {
             val reconnected = try {
                 connectMutex.withLock {
                     connectCooldownUntil = 0L
                     ensureConnected()
                 }
+                reconcileCanonicalCancellations()
                 true
             } catch (e: Exception) {
                 Log.d(TAG, "Background-turn reconnect retry failed: ${e.message}")
@@ -4727,20 +4822,53 @@ class GatewayChatClient(
                 }
                 if (preservedLiveId == null) {
                     true
+                } else if (!turn.androidOwned) {
+                    // Restore/retire asks without attaching the producer's runtime.
+                    liveSessionId = preservedLiveId
+                    val ready = readySignal ?: throw GatewayRpcException("gateway connection changed")
+                    val socket = webSocket ?: throw GatewayRpcException("gateway socket changed")
+                    val snapshot = rpc("session.events.since", buildJsonObject {
+                        put("session_id", preservedLiveId)
+                        put("last_seen", Long.MAX_VALUE)
+                    }, expectedConnection = ready, expectedSocket = socket)
+                    if (readySignal !== ready || webSocket !== socket || activeTurn !== turn ||
+                        liveSessionId != preservedLiveId
+                    ) {
+                        false
+                    } else if (snapshot.isSuccess) {
+                        replayServerRequests(snapshot.getOrThrow(), preservedLiveId)
+                        true
+                    } else {
+                        snapshot.exceptionOrNull().isMethodNotFound()
+                    }
                 } else {
                     // Bind before activation so a tail event racing the RPC ack
                     // still matches the original active turn.
                     liveSessionId = preservedLiveId
+                    val ready = readySignal ?: throw GatewayRpcException("gateway connection changed")
+                    val socket = webSocket ?: throw GatewayRpcException("gateway socket changed")
                     val activated = rpc(
                         "session.activate",
                         buildJsonObject {
                             put("session_id", preservedLiveId)
                             put("omit_messages", true)
                         },
+                        expectedConnection = ready,
+                        expectedSocket = socket,
                     )
                     when {
+                        readySignal !== ready || webSocket !== socket || activeTurn !== turn ||
+                            liveSessionId != preservedLiveId -> false
                         activated.isSuccess -> {
                             activated.getOrNull()?.let { result ->
+                                // The start frame may have been lost on the old
+                                // socket. Exact running recovery is equivalent
+                                // proof of activity; Idle alone is not. A queued
+                                // prompt may still belong to a later turn.
+                                if (result.stringField("session_id") == preservedLiveId &&
+                                    result.booleanField("running") == true &&
+                                    (result["queued"] == null || result["queued"] == JsonNull)
+                                ) turn.markRecoveredStarted()
                                 applySessionResultInfo(result)
                                 turn.restorePendingClarify(result)
                                 replayServerRequests(result)
@@ -4750,6 +4878,11 @@ class GatewayChatClient(
                                 )
                             }
                             true
+                        }
+                        (activated.exceptionOrNull() as? GatewayRpcException)?.code == 4097 -> {
+                            if (activeTurn === turn) activeTurn = null
+                            turn.failFromTransport(activated.exceptionOrNull()?.message ?: "Hermes admission needs explicit recovery")
+                            return
                         }
                         activated.exceptionOrNull().isMethodNotFound() -> {
                             Log.i(
@@ -4783,18 +4916,9 @@ class GatewayChatClient(
                     "Gateway socket rejoined mid-turn (session=$storedSessionId) — " +
                         "rebound live session, awaiting tail",
                 )
-                // A reconnect that followed a route RETARGET gets a short settle
-                // (the fresh socket won't replay the in-flight turn); a normal
-                // blip-rejoin keeps the full turn watchdog. A live event resets
-                // either back to the per-event timeout.
-                turn.armWatchdog(
-                    if (retargetedThisTurn) {
-                        retargetedThisTurn = false
-                        POST_RETARGET_SETTLE_MS
-                    } else {
-                        turnIdleTimeoutMs
-                    },
-                )
+                // A quiet tail is checked through read-only state. Route changes
+                // do not shorten a healthy turn's lifetime.
+                turn.armWatchdog()
                 return
             }
             delay(fullJitterDelayMs(backoffMs, reconnectJitterUnit()))
@@ -4805,6 +4929,9 @@ class GatewayChatClient(
     }
 
     private fun closeSocket(reason: String) {
+        canonicalSessions.reset()
+        canonicalDescribed = false
+        canonicalMutations.reset()
         clearSessionInteractions()
         webSocket?.close(1000, reason)
         webSocket = null
@@ -4866,6 +4993,167 @@ class GatewayChatClient(
     // ------------------------------------------------------------------
 
     private suspend fun rpc(
+        method: String,
+        params: JsonObject,
+        timeoutMs: Long = rpcTimeoutMs,
+        expectedConnection: CompletableDeferred<Unit>? = null,
+        expectedSocket: WebSocket? = null,
+    ): Result<JsonObject> {
+        if (!canonicalSessions.enabled) return rpcWire(method, params, timeoutMs, expectedConnection, expectedSocket)
+        val profile = params.stringField("profile") ?: params.stringField("session_id")?.let(canonicalSessions::profileForSession)
+            ?: liveSessionProfile ?: currentSessionProfile()
+        val connection = expectedConnection ?: readySignal
+        val socket = expectedSocket ?: webSocket
+        suspend fun nativeCall(nativeMethod: String, nativeParams: JsonObject): Result<JsonObject> {
+            if (nativeMethod == "prompt.submit") {
+                val binding = nativeParams.stringField("submission_id")?.let { canonicalCancellations[it] }
+                    ?: activeTurn?.canonicalSubmission?.takeIf { it.submissionId == nativeParams.stringField("submission_id") }
+                if (binding?.cancelRequested == true && binding.nativeParams == null)
+                    return Result.failure(GatewayRpcException("Cancelled before admission", 4099))
+            }
+            val prepared = if (nativeMethod == "prompt.submit") canonicalSessions.prepare(nativeMethod, nativeParams, profile)
+                else GatewayCanonicalRequest(nativeMethod, nativeParams)
+            if (nativeMethod == "prompt.submit") activeTurn?.takeIf { liveSessionId == nativeParams.stringField("session_id") }
+                ?.canonicalSubmission?.nativeParams = prepared.params
+            val response = rpcWire(prepared.method, prepared.params, timeoutMs, connection, socket)
+            if (response.isFailure) return response
+            var result = response.getOrThrow()
+            val sessionId = result.stringField("session_id") ?: nativeParams.stringField("session_id")
+            if (nativeMethod == "session.resume" && sessionId != null) {
+                val binding = if (sessionId == liveSessionId) activeTurn?.takeIf { it.androidOwned }?.canonicalSubmission
+                    else backgroundTurns[sessionId]?.canonicalSubmission
+                if (binding != null) {
+                    binding.sessionId = sessionId
+                    binding.storedSessionId = binding.storedSessionId ?: storedSessionId?.takeIf { liveSessionId == sessionId } ?: sessionId
+                    binding.profile = profile
+                    if (binding.awaitingReceipt && binding.nativeParams == null && binding.pipelineParams != null) {
+                        val receipt = canonicalMutations.execute("prompt.submit", binding.pipelineParams!!, result, ::nativeCall)
+                            ?.getOrElse { return Result.failure(it) }
+                            ?: return Result.failure(GatewayRpcException("The interrupted edit pipeline needs explicit recovery", 4098))
+                        finishCanonicalReceipt(binding, receipt)
+                    }
+                    if (binding.awaitingReceipt && binding.nativeParams != null) {
+                        // Native submission identity is idempotent even when its original receipt was lost.
+                        val receipt = rpcWire("prompt.submit", binding.nativeParams!!, timeoutMs, connection, socket).getOrElse { return Result.failure(it) }
+                        finishCanonicalReceipt(binding, receipt)
+                    }
+                    binding.admissionId?.let { admission ->
+                        val receipt = rpcWire("prompt.receipt", buildJsonObject {
+                            put("session_id", sessionId); put("admission_id", admission)
+                            profile?.let { put("profile", it) }
+                        }, timeoutMs, connection, socket).getOrElse { return Result.failure(it) }
+                        val status = receipt.stringField("status")
+                        if (status == "unknown") return Result.failure(GatewayRpcException("The Hermes owner restarted during this turn; its admission needs explicit recovery", 4097))
+                        result = JsonObject(result + ("running" to JsonPrimitive(status in setOf("queued", "started"))))
+                    }
+                }
+            }
+            return Result.success(canonicalSessions.observeResult(nativeMethod, prepared.params, result, profile))
+        }
+        return try {
+            canonicalDescribeMutex.withLock {
+                if (!canonicalDescribed) {
+                    val descriptor = nativeCall("runtime.describe", JsonObject(emptyMap())).getOrThrow()
+                    val capabilities = descriptor["capabilities"] as? JsonArray
+                    require(capabilities?.any { (it as? JsonPrimitive)?.contentOrNull == "durable-admission-v1" } == true) {
+                        "Hermes session authority does not advertise durable admissions"
+                    }
+                    canonicalDescribed = true
+                }
+            }
+            val sid = params.stringField("session_id")
+            val scopedParams = if (profile == null) params else JsonObject(params + ("profile" to JsonPrimitive(profile)))
+            if (method == "prompt.submit" && params.booleanField("confirm_truncate") == true)
+                activeTurn?.canonicalSubmission?.pipelineParams = scopedParams
+            canonicalMutations.execute(method, scopedParams,
+                sid?.let { canonicalSessions.snapshot(it, profile) }, ::nativeCall)?.let { return it }
+            val request = canonicalSessions.prepare(method, params, profile)
+            nativeCall(request.method, request.params).map { result ->
+                canonicalSessions.observeResult(method, params, result, profile)
+            }
+        } catch (error: Exception) {
+            Result.failure(if (error is GatewayRpcException) error else GatewayRpcException(error.message ?: "Canonical session request failed"))
+        }
+    }
+
+    private fun finishCanonicalReceipt(binding: CanonicalSubmission, receipt: JsonObject) {
+        binding.admissionId = receipt.stringField("admission_id")
+        val buffered = synchronized(binding) {
+            binding.awaitingReceipt = false
+            binding.frames.toList().also { binding.frames.clear() }
+        }
+        readySignal?.let { ready -> buffered.forEach { handleFrame(it, ready) } }
+        if (binding.cancelRequested) binding.nativeParams?.stringField("session_id")?.let { sid ->
+            scope.launch { stopCanonicalSubmission(sid, binding) }
+        }
+    }
+
+    private suspend fun stopCanonicalSubmission(sid: String, binding: CanonicalSubmission): Boolean {
+        val admission = binding.admissionId ?: return false
+        val selector = buildJsonObject {
+            put("session_id", sid); put("admission_id", admission)
+            binding.profile?.let { put("profile", it) }
+        }
+        var receipt = rpc("prompt.receipt", selector).getOrNull() ?: return false
+        if (receipt.stringField("status") == "queued") {
+            val cancelled = rpc("prompt.cancel", selector)
+            if (cancelled.getOrNull()?.stringField("status") == "terminal") {
+                canonicalCancellations.remove(binding.submissionId, binding)
+                return true
+            }
+            // A claim may win before the server's first cancel read. Re-read the exact
+            // admission and interrupt only its claimed generation, never a successor.
+            receipt = rpc("prompt.receipt", selector).getOrNull() ?: return false
+        }
+        when (receipt.stringField("status")) {
+            "started" -> rpc("session.interrupt", buildJsonObject {
+                put("session_id", sid)
+                receipt["execution_generation"]?.let { put("execution_generation", it) }
+                binding.profile?.let { put("profile", it) }
+            })
+            "terminal" -> {
+                canonicalCancellations.remove(binding.submissionId, binding)
+                return true
+            }
+        }
+        return false
+    }
+
+    private suspend fun reconcileCanonicalCancellations() {
+        if (canonicalCancellations.isEmpty()) return
+        check(canonicalSessions.enabled) { "Cancellation needs the original session authority" }
+        for (binding in canonicalCancellations.values.toList()) {
+            var sid = binding.sessionId ?: continue
+            val snapshot = rpc("session.resume", buildJsonObject {
+                put("session_id", sid); put("omit_messages", true)
+                binding.profile?.let { put("profile", it) }
+            }).getOrThrow()
+            sid = snapshot.stringField("session_id") ?: sid
+            binding.sessionId = sid
+            if (binding.admissionId == null) {
+                binding.admissionId = (snapshot["pending"] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+                    .singleOrNull { it.stringField("input_id") == binding.submissionId }?.stringField("admission_id")
+            }
+            if (binding.admissionId == null && binding.nativeParams != null) {
+                // Same-process ambiguous publication: the same native idempotency key
+                // retrieves its receipt before the exact cancellation is reconciled.
+                binding.admissionId = rpc("prompt.submit", binding.nativeParams!!).getOrThrow().stringField("admission_id")
+            }
+            check(stopCanonicalSubmission(sid, binding)) { "Hermes cancellation remains unconfirmed" }
+        }
+    }
+
+    suspend fun recoverCancelledAdmission(storedId: String, submissionId: String?, admissionId: String?): Result<Unit> = runCatching {
+        require(submissionId != null || admissionId != null) { "Saved cancellation lacks an owner identity" }
+        val binding = CanonicalSubmission(GatewayAdmissionIdentity(submissionId, admissionId, true)).apply {
+            sessionId = storedId; storedSessionId = storedId; profile = currentSessionProfile(); cancelRequested = true
+        }
+        canonicalCancellations[binding.submissionId] = binding
+        connectMutex.withLock { ensureConnected() }
+        reconcileCanonicalCancellations()
+    }
+
+    private suspend fun rpcWire(
         method: String,
         params: JsonObject,
         timeoutMs: Long = rpcTimeoutMs,
@@ -4936,7 +5224,12 @@ class GatewayChatClient(
                     put("content_base64", attachment.base64)
                 },
                 timeoutMs = ATTACH_RPC_TIMEOUT_MS,
-            )
+            ).recoverCatching { failure ->
+                if (canonicalSessions.enabled && failure.isMethodNotFound()) {
+                    throw GatewayRpcException("This Hermes session authority does not support PDF page attachments", -32601)
+                }
+                throw failure
+            }
             else -> rpc(
                 ATTACH_METHOD_FILE,
                 buildJsonObject {
@@ -5026,23 +5319,15 @@ class GatewayChatClient(
     // Turn handle
     // ------------------------------------------------------------------
 
-    /** Per-event idle-watchdog duration — asks block server-side with no events, so they arm longer. */
-    private fun watchdogTimeoutFor(eventType: String, payload: JsonObject? = null): Long = when {
-        eventType == "clarify.request" || eventType == "secret.request" -> ASK_CLARIFY_SECRET_TIMEOUT_MS
-        eventType == "sudo.request" -> ASK_SUDO_TIMEOUT_MS
-        eventType == "approval.request" -> ASK_UNBOUNDED_TIMEOUT_MS
-        eventType == "status.update" &&
-            payload?.stringField("kind") == "compacting" -> compactingTimeoutMs
-        else -> turnIdleTimeoutMs
-    }
-
     private inner class GatewayTurn(
         val callbacks: GatewayTurnCallbacks,
         dedupeAdjacentMessageStarts: Boolean = false,
         deferEvents: Boolean = false,
-        private val androidOwned: Boolean = false,
+        val androidOwned: Boolean = false,
+        canonicalIdentity: GatewayAdmissionIdentity? = null,
         private val onTransportAccepted: () -> Unit = { },
     ) : ActiveTurnHandle {
+        val canonicalSubmission = CanonicalSubmission(canonicalIdentity)
         private val mapper = GatewayEventMapper(callbacks, dedupeAdjacentMessageStarts)
         val pendingInteraction: GatewayAsk?
             get() = mapper.currentInteraction
@@ -5136,8 +5421,8 @@ class GatewayChatClient(
         val ended: Boolean get() = mapper.turnEnded || cancelled || settledWithoutTerminalFrame
 
         /**
-         * True once any turn-scoped event has arrived — proof the server
-         * received the submit and is running the turn. `session.info` doesn't
+         * True once a turn-scoped event or exact running recovery proves the
+         * server received the submit and is running the turn. `session.info` doesn't
          * count: it's connection-level (resume/config echoes) and can arrive
          * independent of this turn, so it must not suppress a legitimate
          * preflight fallback.
@@ -5176,7 +5461,7 @@ class GatewayChatClient(
             // marshalled through the same dispatcher, preserving callback order
             // even when the WebSocket reader and reconnect coroutine differ.
             if (type == "message.complete" && reconcileRequired) {
-                callbacks.onReconcileRequired()
+                callbacks.onReconcileRequired(false)
             }
             mapper.onEvent(type, payload)
             if (mapper.turnEnded) {
@@ -5185,7 +5470,8 @@ class GatewayChatClient(
                 handoffQueuedSuccessor()
             } else {
                 // Map first: native asks own their deadline, including across unrelated events.
-                armWatchdog(watchdogTimeoutFor(type, payload))
+                // Rearm the read-only check after progress.
+                armWatchdog()
             }
         }
 
@@ -5195,7 +5481,7 @@ class GatewayChatClient(
          * heartbeat can race `prompt.submit` and is not a completion boundary.
          */
         fun captureLivenessGeneration(): Long? =
-            if (androidOwned && started && !ended) progressGeneration.get() else null
+            if (started && !ended) progressGeneration.get() else null
 
         fun settleFromAuthoritativeSessionState(
             running: Boolean?,
@@ -5220,7 +5506,7 @@ class GatewayChatClient(
             disarmWatchdog()
             armSettledTurnDrain()
             Log.i(TAG, "Gateway turn settled from $source after missing terminal frame")
-            callbacks.onReconcileRequired()
+            callbacks.onReconcileRequired(true)
             callbacks.onComplete()
             tracer.done("history-reconcile")
             handoffQueuedSuccessor()
@@ -5295,15 +5581,17 @@ class GatewayChatClient(
             }
         }
 
-        fun armWatchdog(timeoutMs: Long = turnIdleTimeoutMs) {
+        fun armWatchdog() {
             disarmWatchdog()
             if (mapper.currentInteraction?.serverRequest == true) return
             watchdog = scope.launch {
-                delay(timeoutMs)
-                if (!ended) {
-                    Log.w(TAG, "Gateway turn timed out after ${timeoutMs}ms")
-                    interruptServerSide()
-                    failFromTransport("Gateway turn timed out")
+                while (true) {
+                    delay(turnIdleTimeoutMs)
+                    if (ended || activeTurn !== this@GatewayTurn) break
+                    // Missing/unsupported/failed snapshots remain unknown. Only
+                    // exact Idle with no intervening progress settles the stream.
+                    Log.i(TAG, "Gateway turn quiet; checking authoritative state (no interrupt)")
+                    listActiveSessions()
                 }
             }
         }
@@ -5329,6 +5617,16 @@ class GatewayChatClient(
 
         override fun cancel() {
             if (ended) return
+            if (canonicalSubmission.sessionId != null || canonicalSubmission.nativeParams != null || canonicalSubmission.restored) {
+                canonicalSubmission.cancelRequested = true
+                canonicalCancellations[canonicalSubmission.submissionId] = canonicalSubmission
+                if ((!canonicalSessions.enabled || webSocket == null) && !backgroundRejoinInProgress) {
+                    backgroundRejoinInProgress = true
+                    scope.launch {
+                        try { attemptBackgroundTurnRejoin() } finally { backgroundRejoinInProgress = false }
+                    }
+                }
+            }
             cancelled = true
             disarmWatchdog()
             tracer.done("cancelled")
@@ -5348,8 +5646,16 @@ class GatewayChatClient(
         }
 
         private fun interruptServerSide() {
-            val sid = liveSessionId ?: return
+            val sid = canonicalSubmission.sessionId ?: liveSessionId ?: return
+            // This path is explicit handle cancellation, never idle expiry.
+            // Upstream rejects arbitrary reason/source keys on the wire.
+            Log.i(TAG, "session.interrupt requested reason=client_cancel")
             scope.launch {
+                if (canonicalSubmission.sessionId != null || canonicalSubmission.nativeParams != null || canonicalSubmission.restored) {
+                    canonicalSubmission.cancelRequested = true
+                    if (canonicalSessions.enabled) stopCanonicalSubmission(sid, canonicalSubmission)
+                    return@launch
+                }
                 // Best-effort: unblocks the server (also releases blocked
                 // interactive asks). Failure is fine — socket may be gone.
                 rpc("session.interrupt", buildJsonObject { put("session_id", sid) })
@@ -5493,7 +5799,9 @@ class GatewayChatClient(
         onToolCallFailed = { a, b -> dispatchIfCurrent(stillCurrent) { callbacks.onToolCallFailed(a, b) } },
         onToolOutputRisk = { v -> dispatchIfCurrent(stillCurrent) { callbacks.onToolOutputRisk(v) } },
         onTurnComplete = { dispatchIfCurrent(stillCurrent) { callbacks.onTurnComplete() } },
-        onReconcileRequired = { dispatchIfCurrent(stillCurrent) { callbacks.onReconcileRequired() } },
+        onReconcileRequired = { authoritative ->
+            dispatchIfCurrent(stillCurrent) { callbacks.onReconcileRequired(authoritative) }
+        },
         onComplete = { dispatchIfCurrent(stillCurrent) { callbacks.onComplete() } },
         onUsage = { v -> dispatchIfCurrent(stillCurrent) { callbacks.onUsage(v) } },
         onError = { v -> dispatchIfCurrent(stillCurrent) { callbacks.onError(v) } },

@@ -47,6 +47,36 @@ drain, and cleanup. If synthesis starvation dominates, evaluate coalescing again
 first-audio latency before increasing queue depth. See
 [fallback diagnosis](../standard-voice-fallback.md). No gapless device claim yet.
 
+## Complete the compound missing-speech investigation
+
+Issue [#704](https://github.com/Codename-11/hermes-relay/issues/704) also requires
+physical confirmation across basic file playback and streaming PCM; source and
+synthetic-sink regressions cannot certify the reported devices/providers. See
+the focused playback matrix in [voice diagnosis](../standard-voice-fallback.md#missing-speech-and-playback-completion).
+
+- Confirm Final answer only on the reported Standard route in
+  [#751](https://github.com/Codename-11/hermes-relay/issues/751). Offline tests
+  reproduce premature observer retirement when a new placeholder is paired
+  with a delayed run-state notification; the observer now reads current state.
+  Reporter confirmation and a sanitized per-failure trace are still needed to
+  establish whether this caused the original missing synthesis request.
+- Obtain reporter confirmation of live ElevenLabs synthesis after the provider
+  default-selection fix in [#750](https://github.com/Codename-11/hermes-relay/issues/750).
+  Offline configuration and request-builder tests do not certify provider
+  acceptance, account/voice availability, or heard playback.
+- Confirm the clarified interruption controls in [#752](https://github.com/Codename-11/hermes-relay/issues/752)
+  on a coordinated device check: Hold, Tap, and Continuous with phone interruption
+  on/off, including Standard without Relay. Offline tests preserve the existing
+  all-mode listener policy and stored choices; they do not certify microphone or
+  speaker behavior. PR #702's default change and PR #684's Stop policy remain
+  separate decisions.
+- Confirm [#753](https://github.com/Codename-11/hermes-relay/issues/753) with a
+  non-English voice: disable Speak tool updates, retain intermediate and final
+  assistant readback, and check audible output. Offline regressions verify
+  that English stock updates can be muted independently; they do not establish
+  pronunciation quality or physical playback. Automatic translation would
+  require an explicit speech-language source rather than inferring app locale.
+
 ---
 
 ## Confirm the reported Android 16 native password handoff

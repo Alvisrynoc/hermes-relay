@@ -47,14 +47,26 @@ internal suspend fun loadSessionMessages(
         val collected = ArrayList<MessageItem>()
         var offset = (mode as? SessionMessageLoadMode.Older)?.offset ?: 0
         var payloadChars = 0L
+        val target = if (mode == SessionMessageLoadMode.COMPLETE) null else RECENT_SESSION_MESSAGE_PAGE_SIZE
+        var pageSize = target ?: SESSION_MESSAGE_PAGE_SIZE
 
         while (true) {
-            val request = SessionMessagePageRequest(
-                limit = if (mode == SessionMessageLoadMode.COMPLETE) SESSION_MESSAGE_PAGE_SIZE else RECENT_SESSION_MESSAGE_PAGE_SIZE,
-                offset = offset,
-                order = order,
-            )
-            val page = fetchPage(request).getOrThrow()
+            val limit = target?.let { minOf(pageSize, it - collected.size) } ?: pageSize
+            val request = SessionMessagePageRequest(limit = limit, offset = offset, order = order)
+            val page = try {
+                fetchPage(request).getOrThrow()
+            } catch (error: JsonResponseTooLargeException) {
+                if (limit == 1) {
+                    throw SessionTranscriptTooLargeException(
+                        "History exceeds Android's 8 MiB safe-load limit even with one-message pages. " +
+                            "Open this conversation in Dashboard; no messages were skipped.",
+                    )
+                }
+                // Only byte-limit failures shrink the window. Preserve its offset,
+                // profile and display-history flags, and retain the smaller size.
+                pageSize = maxOf(1, limit / 2)
+                continue
+            }
             payloadChars += page.payloadChars
             if (payloadChars > MAX_COMPLETE_TRANSCRIPT_PAYLOAD_CHARS) {
                 throw SessionTranscriptTooLargeException(
@@ -66,9 +78,14 @@ internal suspend fun loadSessionMessages(
                     "Session transcript exceeds Android's 50,000-message safe-load limit",
                 )
             }
-            collected += page.messages
+            if (mode != SessionMessageLoadMode.COMPLETE) {
+                // Upstream pages backwards from the tail, but each page is chronological.
+                collected.addAll(0, page.messages)
+            } else {
+                collected += page.messages
+            }
 
-            if (mode != SessionMessageLoadMode.COMPLETE) break
+            if (target != null && collected.size >= target) break
             // Older Hermes returned one unpaginated complete envelope. Never issue
             // a speculative second request against that contract.
             val pagination = page.pagination ?: break
